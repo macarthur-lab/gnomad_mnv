@@ -114,6 +114,21 @@ def plot_heatmap_ratio(table1, table2, title, dir): #16x16 tables.
     ax.set_yticklabels(ax.get_yticklabels(), rotation=0)
     plt.savefig(dir, dpi=300)
 
+def calc_symmetry_and_collapse(crosstab):
+    sym = []
+    names = []
+    for i in range(crosstab.shape[0]):
+        for j in range(crosstab.shape[1]):
+            refs = crosstab.index[i]
+            alts = crosstab.index[j]
+            if crosstab.loc[refs,alts]!=0:
+                revcomp_refs = str(Seq(refs).reverse_complement())
+                revcomp_alts = str(Seq(alts).reverse_complement())
+                if not ((revcomp_refs + "->" + revcomp_alts) in names):
+                        sym.append(crosstab.loc[refs, alts] / crosstab.loc[revcomp_refs, revcomp_alts])
+                        names.append(refs + "->" + alts)
+    return pd.Series(sym,index=names)
+
 
 def draw_null_matrix_dnv(obs_refs, cols, cov): 
     #returns a matrix of probability of each entry, given the number of reference 2bp as obs_refs
