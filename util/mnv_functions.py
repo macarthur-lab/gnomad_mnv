@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
 __author__ = 'QingboWang'
+
+#all the functions / paths used for the analysis
+
 import numpy as np
 import copy as cp
 import sys, math, cmath
@@ -20,8 +23,9 @@ from matplotlib.colors import ListedColormap
 from collections import OrderedDict
 from scipy.stats import *
 
-mut_table = pd.read_csv("/Users/qingbowang/Desktop/MNV/fordist_1KG_mutation_rate_table.txt", sep="\s+")
-
+from gnomad_hail.resources import *
+from gnomad_hail.utils import *
+from gnomad_hail.slack_utils import *
 
 def draw_heatmap(crstb, title, outdir, num_style="d"):
     mask = crstb.applymap(lambda x: x == 0)
