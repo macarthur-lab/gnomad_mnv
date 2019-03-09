@@ -4,7 +4,7 @@ Welcome to the github page for the "Landscape of multi-nucleotide variants in 12
 
 The `tutorials` directory contains all the information necessary to apply MNV discovery and annotation pipeline on your own dataset.
 It also allows user to reproduce the main figure and most of the supplementary figure in the gnomAD MNV paper. 
-Specifically, the tutorials directory consists of xx Jupyter notebooks:
+Specifically, the tutorials directory consists of six Jupyter notebooks:
 1. `identify_mnv.ipynb` explains how to extract MNV from a vcf (or a matrix table).
 2. `annotate_mnv.ipynb` explains how to annotate the functional consequences and category of MNVs
 3. `functional_impact.ipynb` explains how to generate per gene (or per individual) statistics 
