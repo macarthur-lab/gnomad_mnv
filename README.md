@@ -17,10 +17,10 @@ Which figure and table in the paper is generated in which notebook is listed bel
 
 | notebook  | main figure  | supplementary figure  | supplementary table  |   supplementary file  |
 |---|---|---|---|---|
-|identify_mnv.ipynb   |   | 11  |   |   |
+|identify_mnv.ipynb   | (1a,b)  | (11)  |   |   |
 |annotate_mnv.ipynb   | 2a  |   |   | 1  |
 |functional_impact.ipynb  | 2  | 2  |   | 1  |
-|global_mechanisms.ipynb  | 3, 4a  | 3-10,12-19  |   | 3  |
+|global_mechanisms.ipynb  | 3, 4a  | 3-19  |   | 3  |
 |per_region_mechanisms.ipynb  | 4b-d  | 20  | 2  |   |
 |phase_sensitivity.ipynb  |   | 1,  | 1  |   |
 
