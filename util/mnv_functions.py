@@ -27,6 +27,132 @@ from gnomad_hail.resources import *
 from gnomad_hail.utils import *
 from gnomad_hail.slack_utils import *
 
+def mnv_category_by_aa_change(snp1_con, snp2_con, mnv_con,aa1,aa2,aa3):
+    if (snp1_con, snp2_con, mnv_con)==("synonymous_variant","missense_variant","missense_variant"):
+        if aa2==aa3: return ("Unchanged")
+        else: return ("Changed missense")
+    elif (snp1_con, snp2_con, mnv_con)==("missense_variant","synonymous_variant","missense_variant"):
+        if aa1==aa3: return ("Unchanged")
+        else: return ("Changed missense")
+    elif (snp1_con, snp2_con, mnv_con)==("missense_variant","missense_variant","missense_variant"):
+        if ((aa1==aa3) or (aa2==aa3)):
+            return ("Partially changed missense")
+        else: return ("Changed missense")
+    else: return ("something wrong going on")
+
+def cons_term_most_severe(cons_term_array):
+    if "start_lost" in cons_term_array: return ("start_lost") #by definition this is sufficient to determine the mnv is uninteresting
+    elif "stop_lost" in cons_term_array: return ("stop_lost")
+    elif "stop_gained" in cons_term_array: return ("stop_gained")
+    elif "missense_variant" in cons_term_array: return ("missense_variant")
+    elif "stop_retained_variant" in cons_term_array: return ("stop_retained_variant")
+    elif "synonymous_variant" in cons_term_array: return ("synonymous_variant")
+    else: return ("Noncoding_or_else")
+
+def mnv_category(snp1_con, snp2_con, mnv_con, aa1, aa2, aa3):
+    # return the MNV consequence category, such as gained PTV, unchange, etc.
+    # just classify everything of 3*3*3=27 pattern.
+    #plus, case where we see start_lost / stop_lost
+    # and if undeterminisitic, look at the aa change and determine.
+    if snp1_con == "synonymous_variant":
+        if snp2_con == "synonymous_variant":
+            if mnv_con == "synonymous_variant":
+                return ("Unchanged")
+            elif mnv_con == "missense_variant":
+                return ("Gained missense")
+            elif mnv_con == "stop_gained":
+                return ("Gained PTV")
+            else:
+                return ("Noncoding_or_else")
+        if snp2_con == "missense_variant":
+            if mnv_con == "synonymous_variant":
+                return ("Lost missense")
+            elif mnv_con == "missense_variant":
+                return (mnv_category_by_aa_change(snp1_con, snp2_con, mnv_con, aa1, aa2, aa3))  # go look at aa change.
+            elif mnv_con == "stop_gained":
+                return ("Gained PTV")
+            else:
+                return ("Noncoding_or_else")
+        if snp2_con == "stop_gained":
+            if mnv_con == "synonymous_variant":
+                return ("Rescued PTV")
+            elif mnv_con == "missense_variant":
+                return ("Rescued PTV")
+            elif mnv_con == "stop_gained":
+                return ("Unchanged")
+            else:
+                return ("Noncoding_or_else")
+    if snp1_con == "missense_variant":
+        if snp2_con == "synonymous_variant":
+            if mnv_con == "synonymous_variant":
+                return ("Lost missense")
+            elif mnv_con == "missense_variant":
+                return (mnv_category_by_aa_change(snp1_con, snp2_con, mnv_con, aa1, aa2, aa3))  # go look at aa change.
+            elif mnv_con == "stop_gained":
+                return ("Gained PTV")
+            else:
+                return ("Noncoding_or_else")
+        if snp2_con == "missense_variant":
+            if mnv_con == "synonymous_variant":
+                return ("Lost missense")
+            elif mnv_con == "missense_variant":
+                return (mnv_category_by_aa_change(snp1_con, snp2_con, mnv_con, aa1, aa2, aa3))  # go look at aa change.
+            elif mnv_con == "stop_gained":
+                return ("Gained PTV")
+            else:
+                return ("Noncoding_or_else")
+        if snp2_con == "stop_gained":
+            if mnv_con == "synonymous_variant":
+                return ("Rescued PTV")
+            elif mnv_con == "missense_variant":
+                return ("Rescued PTV")
+            elif mnv_con == "stop_gained":
+                return ("Unchanged")
+            else:
+                return ("Noncoding_or_else")
+        else:
+            return ("Noncoding_or_else")
+    if snp1_con == "stop_gained":
+        if snp2_con == "synonymous_variant":
+            if mnv_con == "synonymous_variant":
+                return ("Rescued PTV")
+            elif mnv_con == "missense_variant":
+                return ("Rescued PTV")
+            elif mnv_con == "stop_gained":
+                return ("Unchanged")
+            else:
+                return ("Noncoding_or_else")
+        if snp2_con == "missense_variant":
+            if mnv_con == "synonymous_variant":
+                return ("Rescued PTV")
+            elif mnv_con == "missense_variant":
+                return ("Rescued PTV")
+            elif mnv_con == "stop_gained":
+                return ("Unchanged")
+            else:
+                return ("Noncoding_or_else")
+        if snp2_con == "stop_gained":
+            if mnv_con == "synonymous_variant":
+                return ("Rescued PTV")
+            elif mnv_con == "missense_variant":
+                return ("Rescued PTV")
+            elif mnv_con == "stop_gained":
+                return ("Unchanged")
+            else:
+                return ("Noncoding_or_else")
+        else:
+            return ("Noncoding_or_else")
+    #else, involving start_loss etc -> look at mnv cons first.
+    elif mnv_con=="start_lost": return "Unchanged" #by definition individual effect is also start loss
+    elif mnv_con=="stop_lost":
+        if ((snp1_con=="stop_retained_variant") & (snp2_con=="stop_retained_variant")): return "gained_stop_loss"
+        else: return ("Unchanged")
+    elif mnv_con=="stop_retained_variant":#this case, by definition one of the variant is stop_lost, and the other is stop_retained
+        return ("Rescued stop loss")
+    else:
+        return ("Noncoding_or_else")
+
+
 def draw_heatmap(crstb, title, outdir, num_style="d"):
     mask = crstb.applymap(lambda x: x == 0)
     fig, ax = plt.subplots()
