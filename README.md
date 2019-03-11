@@ -1,9 +1,6 @@
 # Multi-nucleotide variants (MNVs) in gnomAD 2.1
 
-Welcome to the github page for the ["Landscape of multi-nucleotide variants in 125,748 human exomes and 15,708 genomes"](https://www.biorxiv.org/content/10.1101/573378v1)
-https://www.biorxiv.org/content/10.1101/573378v1). 
-
-https://www.biorxiv.org/content/10.1101/573378v1
+Welcome to the github page for the ["Landscape of multi-nucleotide variants in 125,748 human exomes and 15,708 genomes"](https://www.biorxiv.org/content/10.1101/573378v1). 
 
 The `tutorials` directory contains all the information necessary to apply MNV discovery and annotation pipeline on your own dataset.
 It also allows user to reproduce the main figure and most of the supplementary figure in the gnomAD MNV paper. 
