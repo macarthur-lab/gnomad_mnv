@@ -6,9 +6,12 @@ This directory stores the codes used for the [gnomAD MNV preprint](https://www.b
 `get_mnv.py` can be used to identify MNVs in your dataset
  (Usage: `get_mnv.py your_vcf_file`)
 
-`annotate_vep_mnv.py` can be used to annotate the functional consequences of MNVs (Usage: `annotate_vep_mnv.py your_mnv_hailtable`)
+`annotate_vep_mnv.py` can be used to annotate the functional consequences of MNVs (Usage: `annotate_vep_mnv.py your_mnv_hailtable 1` for distance 1)
+
+(Note that theare are multiple reasons the codes do not go through, depending on your cloud computing environement. Feel free to post issues / modify the code as necessary.)
 
 (Tweek the `get_tnv_gnomAD.py` below to look into MNVs consisting of 3 SNVs.)
+
 
 ## Codes related to MNV discovery and functional impact annotation:
 
