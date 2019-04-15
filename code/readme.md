@@ -1,4 +1,13 @@
-This directory stores the codes used for the [gnomAD MNV preprint](https://www.biorxiv.org/content/10.1101/573378v2)
+This directory stores the codes used for the [gnomAD MNV preprint](https://www.biorxiv.org/content/10.1101/573378v2), as well as codes for users can run for their own analysis.
+(Other than the `Codes for users to run`, simple copy&paste of the code in your local will mostly not work, due to limited access to the individual level data.)
+
+## Codes for users to run
+
+`get_mnv.py` can be used to identify MNVs in your dataset
+
+`annotate_vep_mnv.py` can be used to annotate the functional consequences of MNVs 
+
+(Tweek the `get_tnv_gnomAD.py` below to look into MNVs consisting of 3 SNVs.)
 
 ## Codes related to MNV discovery and functional impact annotation:
 
