@@ -8,12 +8,11 @@ Specifically, the tutorials directory consists of six Jupyter notebooks:
 1. `identify_mnv.ipynb` explains how to extract MNV from a vcf (or a matrix table).
 2. `annotate_mnv.ipynb` explains how to annotate the functional consequences and category of MNVs
 3. `functional_impact.ipynb` explains how to generate per gene (or per individual) statistics 
-4. `global_mechanisms.ipynb` explains how to analyize the generation mechanisms of MNVs, genome wide (WIP)
+4. `global_mechanisms.ipynb` explains how to analyize the generation mechanisms of MNVs, genome wide 
 5. `per_region_mechanisms.ipynb` explains how to partition the genome into different functional (WIP)
 6. `phase_sensitivity.ipynb` explains how the phasing sensitivity analysis could be performed
 category, and analyze the MNVs across categories
 
-Those with (WIP) are still work in progress, but will be up soon!
 
 Which figure and table in the paper is generated in which notebook is listed below:
 (those with () does are related but not exactly used)
@@ -34,4 +33,4 @@ All the scripts used in the gnomAD MNV paper are stored in the `code` directory.
 However, note that due to the gnomAD sample data as well as the exome data of rare disease families being not publicly available, 
 most of the scripts cannot be simply run in your local.
 
-`util` contains functions and directories used in the analysis.
+`util` contains some of the functions used in the analysis.
