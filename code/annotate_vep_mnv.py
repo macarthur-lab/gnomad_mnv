@@ -143,7 +143,7 @@ def mnv_category(snp1_con, snp2_con, mnv_con, aa1, aa2, aa3):
 
 
 #read MNV
-mnv = hl.read_table(sys.argv[0])
+mnv = hl.read_table(sys.argv[1])
 
 #annotate snv effects
 mnv = mnv.key_by("locus","alleles")
@@ -154,7 +154,7 @@ mnv = mnv.key_by('locus', 'alleles') #and re-key
 mnv = hl.vep(mnv, vep_config, name="snp1_vep") #and vep
 
 #annotate MNV effects, specified by the distance
-if sys.argv[1]==1:
+if sys.argv[2]==1:
     t = mnv.filter(mnv.dist==1)
     t = t.annotate(refs=t.alleles[0] +t.snp2_alleles[0], alts=t.alleles[1] +t.snp2_alleles[1])# annotate combined refs, and alts
     t = t.annotate(mnv_alleles = [t.refs,t.alts]) #and let it be mnv_alleles
@@ -164,7 +164,7 @@ if sys.argv[1]==1:
     t = hl.vep(t, vep_config, name="mnv_vep")
 
 
-if sys.argv[1]==2:
+if sys.argv[2]==2:
     grch37 = hl.get_reference('GRCh37')
     grch37_fasta = 'gs://hail-common/references/human_g1k_v37.fasta.gz'
     grch37_fai = 'gs://hail-common/references/human_g1k_v37.fasta.fai'
@@ -249,4 +249,4 @@ canon_cons_pd.mnv_lof = canon_cons_pd.mnv_lof.astype(str)
 
 
 #and export
-hl.Table.from_pandas(canon_cons_pd).write(sys.argv[0] + "_vepped_d{0}.ht".format(sys.argv[1]), overwrite=True)
+hl.Table.from_pandas(canon_cons_pd).write(sys.argv[1] + "_vepped_d{0}.ht".format(sys.argv[2]), overwrite=True)
