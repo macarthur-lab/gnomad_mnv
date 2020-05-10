@@ -90,7 +90,7 @@ comb = comb.transmute(n_hethet=hl.or_else(comb.n, 0), n_hethom=hl.or_else(comb.n
 comb = comb.select("n_hethet","n_hethom","n_homhom")
 comb = comb.annotate(n_total = comb.n_hethet + comb.n_hethom + comb.n_homhom)
 #write
-comb.write(sys.argv[1] + "mnv_combined.ht", overwrite=True)
+comb.write(sys.argv[1] + "_mnv_combined.ht", overwrite=True)
 
 
 
