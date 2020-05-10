@@ -7,10 +7,10 @@ import hail.expr.aggregators as agg
 from typing import *
 import sys
 
-vcf = hl.import_vcf(sys.argv[0], call_fields=["GT"]) #change the call_fields according to the hail documentation
+vcf = hl.import_vcf(sys.argv[1], call_fields=["GT"]) #change the call_fields according to the hail documentation
 vcf = hl.split_multi_hts(vcf)
-vcf.write(sys.argv[0] + ".mt", overwrite=True)
-mt = hl.read_matrix_table(sys.argv[0] + ".mt")
+vcf.write(sys.argv[1] + ".mt", overwrite=True)
+mt = hl.read_matrix_table(sys.argv[1] + ".mt")
 
 #calling
 mt = mt.select_cols() #dropping unneeded  columns makes things faster
@@ -40,11 +40,11 @@ et = et.annotate(hom = ((et.GT.is_diploid()) & (et.prev_entry.GT.is_diploid()) &
                  hethet = ((et.GT.is_diploid()) & (et.prev_entry.GT.is_diploid()) & (et.GT.phased&et.prev_entry.GT.phased) & (et.GT.is_het_ref()&et.prev_entry.GT.is_het_ref()) & (et.GT==et.prev_entry.GT) ))
 #write
 et_het = et.filter(et.hethet)
-et_het.write(sys.argv[0] + "et_het.ht", overwrite=True) #and we are going to save them
+et_het.write(sys.argv[1] + "et_het.ht", overwrite=True) #and we are going to save them
 et_hethom = et.filter(et.hethom)
-et_hethom.write(sys.argv[0] + "et_hethom.ht", overwrite=True)
+et_hethom.write(sys.argv[1] + "et_hethom.ht", overwrite=True)
 et_hom = et.filter(et.hom)
-et_hom.write(sys.argv[0] + "et_hom.ht", overwrite=True)
+et_hom.write(sys.argv[1] + "et_hom.ht", overwrite=True)
 
 #aggregate
 per_variant_het = et_het.group_by('locus', 'alleles', "prev_row").aggregate(n=hl.agg.count())
@@ -90,7 +90,7 @@ comb = comb.transmute(n_hethet=hl.or_else(comb.n, 0), n_hethom=hl.or_else(comb.n
 comb = comb.select("n_hethet","n_hethom","n_homhom")
 comb = comb.annotate(n_total = comb.n_hethet + comb.n_hethom + comb.n_homhom)
 #write
-comb.write(sys.argv[0] + "mnv_combined.ht", overwrite=True)
+comb.write(sys.argv[1] + "mnv_combined.ht", overwrite=True)
 
 
 
