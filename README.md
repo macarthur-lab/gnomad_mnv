@@ -1,9 +1,9 @@
 # Multi-nucleotide variants (MNVs) in gnomAD 2.1
 
-Welcome to the github page for the ["Landscape of multi-nucleotide variants in 125,748 human exomes and 15,708 genomes"](https://www.biorxiv.org/content/10.1101/573378v2). 
+Welcome to the github page for the ["Landscape of multi-nucleotide variants in 125,748 human exomes and 15,708 genomes"](https://www.nature.com/articles/s41467-019-12438-5). 
 
 The `tutorials` directory contains all the information necessary to apply MNV discovery and annotation pipeline on your own dataset.
-It also allows user to reproduce the main figure and most of the supplementary figure in the gnomAD MNV paper. 
+It also allows user to reproduce the main figure and most of the supplementary figure in the [gnomAD MNV preprint](https://www.biorxiv.org/content/10.1101/573378v2)). 
 Specifically, the tutorials directory consists of six Jupyter notebooks:
 1. `identify_mnv.ipynb` explains how to extract MNV from a vcf (or a matrix table).
 2. `annotate_mnv.ipynb` explains how to annotate the functional consequences and category of MNVs
@@ -27,6 +27,7 @@ Which figure and table in the paper is generated in which notebook is listed bel
 |phase_sensitivity.ipynb  |   | 1  | 1  |   |
 
 However, since most of the analysis was performed in Hail, we recommend users who are not familiat with Hail to visit the [Hail tutorial page](https://hail.is/docs/0.2/tutorials-landing.html).
+(The analysis was performed using Hail version 0.2.11, and we recommend downloading this specific version of hail to perform MNV analysis using Hail, e.g. with command `pip install hail==0.2.11`.)
 
 
 All the scripts used in the gnomAD MNV paper are stored in the `code` directory. 
@@ -34,3 +35,5 @@ However, note that due to the gnomAD sample data as well as the exome data of ra
 most of the scripts cannot be simply run in your local.
 
 `util` contains some of the functions used in the analysis.
+
+
