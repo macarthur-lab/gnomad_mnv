@@ -14,7 +14,7 @@ Specifically, the tutorials directory consists of six Jupyter notebooks:
 category, and analyze the MNVs across categories
 
 
-Which figure and table in the paper is generated in which notebook is listed below:
+Which figure and table in the preprint/paper is generated in which notebook is listed below:
 (those with () does are related but not exactly used)
 
 | notebook  | main figure  | supplementary figure  | supplementary table  |   supplementary file  |
