@@ -1,0 +1,14 @@
+{
+	"folders": [
+		{
+			"path": "../.."
+		},
+		{
+			"path": "../../../gnomad_methods"
+		},
+		{
+			"path": "../../../gnomad_qc"
+		}
+	],
+	"settings": {}
+}
