@@ -1,14 +1,14 @@
 # Multi-nucleotide variants (MNVs) in gnomAD 2.1
 
-Welcome to the github page for the ["Landscape of multi-nucleotide variants in 125,748 human exomes and 15,708 genomes"](https://www.nature.com/articles/s41467-019-12438-5). 
+Welcome to the github page for the ["Landscape of multi-nucleotide variants in 125,748 human exomes and 15,708 genomes"](https://www.nature.com/articles/s41467-019-12438-5).
 
-The `tutorials` directory contains all the information necessary to apply MNV discovery and annotation pipeline on your own dataset.
-It also allows user to reproduce the main figure and most of the supplementary figure in the [gnomAD MNV preprint](https://www.biorxiv.org/content/10.1101/573378v2)). 
-Specifically, the tutorials directory consists of six Jupyter notebooks:
+The `v2/tutorials` directory contains all the information necessary to apply MNV discovery and annotation pipeline on your own dataset.
+It also allows user to reproduce the main figure and most of the supplementary figure in the [gnomAD MNV preprint](https://www.biorxiv.org/content/10.1101/573378v2)).
+Specifically, the v2 tutorials consist of six Jupyter notebooks:
 1. `identify_mnv.ipynb` explains how to extract MNV from a vcf (or a matrix table).
 2. `annotate_mnv.ipynb` explains how to annotate the functional consequences and category of MNVs
-3. `functional_impact.ipynb` explains how to generate per gene (or per individual) statistics 
-4. `global_mechanisms.ipynb` explains how to analyize the generation mechanisms of MNVs, genome wide 
+3. `functional_impact.ipynb` explains how to generate per gene (or per individual) statistics
+4. `global_mechanisms.ipynb` explains how to analyize the generation mechanisms of MNVs, genome wide
 5. `per_region_mechanisms.ipynb` explains how to partition the genome into different functional (WIP)
 6. `phase_sensitivity.ipynb` explains how the phasing sensitivity analysis could be performed
 category, and analyze the MNVs across categories
@@ -30,10 +30,10 @@ However, since most of the analysis was performed in Hail, we recommend users wh
 (The analysis was performed using Hail version 0.2.11, and we recommend downloading this specific version of hail to perform MNV analysis using Hail, e.g. with command `pip install hail==0.2.11`.)
 
 
-All the scripts used in the gnomAD MNV paper are stored in the `code` directory. 
-However, note that due to the gnomAD sample data as well as the exome data of rare disease families being not publicly available, 
+All the scripts used in the gnomAD MNV paper are stored in the `v2/code` directory.
+However, note that due to the gnomAD sample data as well as the exome data of rare disease families being not publicly available,
 most of the scripts cannot be simply run in your local.
 
-`util` contains some of the functions used in the analysis.
+`v2/util` contains some of the functions used in the v2 analysis.
 
-
+The `v4` directory contains the MNV pipeline for gnomAD v4 (GRCh38); see `v4/README.md`.
