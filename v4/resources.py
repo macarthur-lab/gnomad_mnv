@@ -31,10 +31,24 @@ def _mnv_root_path(
     )
 
 
+def _test_gene_suffix(test: bool, test_genes: Optional[List[str]]) -> str:
+    """Build a filename suffix identifying the gene(s) used in a test run.
+
+    :param test: Whether this is a test run. If False, no suffix is added.
+    :param test_genes: Optional list of gene names tested. If None or empty while
+        ``test`` is True, the suffix is ``.test`` (generic, no genes specified).
+    :return: Filename suffix, e.g. ``".test_PCSK9_PCNT"``, ``".test"``, or ``""``.
+    """
+    if not test:
+        return ""
+    return f".test_{'_'.join(test_genes)}" if test_genes else ".test"
+
+
 def mnv_discovery(
     version: str = CURRENT_VERSION,
     test: bool = False,
     data_type: str = "exomes",
+    test_genes: Optional[List[str]] = None,
 ) -> TableResource:
     """Get the MNV discovery TableResource.
 
@@ -45,12 +59,16 @@ def mnv_discovery(
     :param test: Whether to use the testing output bucket. Default is False.
     :param data_type: Data type, either ``"exomes"`` or ``"genomes"``. Default is
         ``"exomes"``.
+    :param test_genes: Optional list of gene names tested (``test`` must be True).
+        Appended to the output filename so that multiple test runs, e.g. for
+        different genes, don't overwrite each other's output.
     :return: TableResource for MNV discovery output.
     """
     return TableResource(
         path=(
             f"{_mnv_root_path(version, test, data_type)}"
-            f"/gnomad.{data_type}.v{version}.mnv_discovery.ht"
+            f"/gnomad.{data_type}.v{version}.mnv_discovery"
+            f"{_test_gene_suffix(test, test_genes)}.ht"
         )
     )
 
@@ -59,6 +77,7 @@ def mnv_annotated(
     version: str = CURRENT_VERSION,
     test: bool = False,
     data_type: str = "exomes",
+    test_genes: Optional[List[str]] = None,
 ) -> TableResource:
     """Get the annotated MNV TableResource.
 
@@ -69,12 +88,16 @@ def mnv_annotated(
     :param test: Whether to use the testing output bucket. Default is False.
     :param data_type: Data type, either ``"exomes"`` or ``"genomes"``. Default is
         ``"exomes"``.
+    :param test_genes: Optional list of gene names tested (``test`` must be True).
+        Appended to the output filename so that multiple test runs, e.g. for
+        different genes, don't overwrite each other's output.
     :return: TableResource for annotated MNV output.
     """
     return TableResource(
         path=(
             f"{_mnv_root_path(version, test, data_type)}"
-            f"/gnomad.{data_type}.v{version}.mnv_annotated.ht"
+            f"/gnomad.{data_type}.v{version}.mnv_annotated"
+            f"{_test_gene_suffix(test, test_genes)}.ht"
         )
     )
 

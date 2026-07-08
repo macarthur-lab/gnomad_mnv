@@ -20,14 +20,19 @@ Usage::
     python -m v4.discover_mnv --discover --overwrite
     python -m v4.discover_mnv --annotate
     python -m v4.discover_mnv --discover --annotate --test
+    python -m v4.discover_mnv --discover --annotate --test \\
+        PCSK9=chr1:55039447-55064852 PCNT=chr21:46324141-46445769
 """
 
 import argparse
 import logging
 import time
-from typing import List
+from typing import List, Optional, Tuple
 
 import hail as hl
+
+from gnomad.resources.grch38.gnomad import public_release
+from gnomad_qc.v4.resources.annotations import get_vep
 
 from v4.resources import (
     MNV_ENTRIES_TO_KEEP,
@@ -44,8 +49,12 @@ logger = logging.getLogger("discover_mnv")
 logger.setLevel(logging.INFO)
 
 MAX_MNV_DISTANCE = 2
-# PCSK9 on GRCh38 (chr1:55,039,447-55,064,852).
-TEST_INTERVAL = "chr1:55039447-55064852"
+
+DEFAULT_TEST_GENES = [
+    # PCNT on GRCh38.
+    ("PCNT", "chr21:46324141-46445769"),
+]
+"""Default gene(s)/interval(s) used when ``--test`` is given with no values."""
 
 
 # ---------------------------------------------------------------------------
@@ -319,6 +328,25 @@ def _aggregate_mnv_pairs(ht: hl.Table) -> hl.Table:
     )
 
 
+def _parse_test_genes(values: List[str]) -> List[Tuple[str, str]]:
+    """Parse ``--test`` values into (gene_name, interval) pairs.
+
+    :param values: List of strings in the form ``GENE_NAME=INTERVAL``, e.g.
+        ``"PCSK9=chr1:55039447-55064852"``.
+    :return: List of (gene_name, interval) tuples.
+    """
+    parsed = []
+    for value in values:
+        if "=" not in value:
+            raise ValueError(
+                f"Invalid --test value {value!r}; expected GENE_NAME=INTERVAL, e.g."
+                " 'PCSK9=chr1:55039447-55064852'."
+            )
+        name, interval = value.split("=", 1)
+        parsed.append((name, interval))
+    return parsed
+
+
 # ---------------------------------------------------------------------------
 # Top-level discovery + annotation
 # ---------------------------------------------------------------------------
@@ -413,9 +441,6 @@ def annotate_mnv(mnv_ht: hl.Table) -> hl.Table:
     :param mnv_ht: MNV Hail Table output from :func:`discover_mnv`.
     :return: MNV Table annotated with AC, AF, filters, and VEP for both SNVs.
     """
-    from gnomad.resources.grch38.gnomad import public_release
-    from gnomad_qc.v4.resources.annotations import get_vep
-
     # --- Frequency and filter annotations from exomes release. ---
     freq_ht = public_release("exomes").ht()
 
@@ -459,20 +484,32 @@ def main(args: argparse.Namespace) -> None:
         tmp_dir="gs://gnomad-tmp-4day/discover_mnv",
     )
 
+    # ``args.test`` is None when --test is omitted, [] when given with no values
+    # (use the default test gene(s)), or a list of "GENE_NAME=INTERVAL" strings.
+    test_enabled = args.test is not None
+    test_genes: List[Tuple[str, str]] = []
+    if test_enabled:
+        test_genes = _parse_test_genes(args.test) if args.test else DEFAULT_TEST_GENES
+    gene_names: Optional[List[str]] = (
+        [name for name, _ in test_genes] if test_enabled else None
+    )
+    intervals: Optional[List[str]] = (
+        [interval for _, interval in test_genes] if test_enabled else None
+    )
+
     if args.discover:
-        if args.test:
+        if test_enabled:
             logger.info(
-                "Running in test mode, subsetting to PCSK9 (%s)...",
-                TEST_INTERVAL,
+                "Running in test mode, subsetting to %s...",
+                ", ".join(f"{name} ({interval})" for name, interval in test_genes),
             )
         else:
             logger.info("Starting MNV discovery.")
         start = time.time()
 
-        # --- Load unsplit VDS, optionally filtering to test interval. ---
-        filter_intervals = [TEST_INTERVAL] if args.test else None
+        # --- Load unsplit VDS, optionally filtering to test intervals. ---
         vds = get_gnomad_v4_vds(
-            filter_intervals=filter_intervals,
+            filter_intervals=intervals,
             high_quality_only=args.high_quality_only,
             release_only=args.release_only,
         )
@@ -485,7 +522,7 @@ def main(args: argparse.Namespace) -> None:
         )
 
         # --- Write discovery output. ---
-        discovery_resource = mnv_discovery(test=args.test)
+        discovery_resource = mnv_discovery(test=test_enabled, test_genes=gene_names)
         logger.info("Writing MNV discovery results to %s.", discovery_resource.path)
         mnv_ht.write(discovery_resource.path, overwrite=args.overwrite)
 
@@ -494,10 +531,10 @@ def main(args: argparse.Namespace) -> None:
 
     if args.annotate:
         logger.info("Annotating MNV pairs with frequency and VEP data...")
-        mnv_ht = mnv_discovery(test=args.test).ht()
+        mnv_ht = mnv_discovery(test=test_enabled, test_genes=gene_names).ht()
         mnv_ht = annotate_mnv(mnv_ht)
 
-        annotated_resource = mnv_annotated(test=args.test)
+        annotated_resource = mnv_annotated(test=test_enabled, test_genes=gene_names)
         logger.info("Writing annotated MNV results to %s.", annotated_resource.path)
         mnv_ht.write(annotated_resource.path, overwrite=args.overwrite)
 
@@ -533,10 +570,22 @@ if __name__ == "__main__":
         help="Whether to overwrite existing output files.",
         action="store_true",
     )
+    default_test_genes_str = " ".join(
+        f"{name}={interval}" for name, interval in DEFAULT_TEST_GENES
+    )
     parser.add_argument(
         "--test",
-        help="Run on the PCSK9 locus only (chr1:55039447-55064852) for quick testing.",
-        action="store_true",
+        help=(
+            "Run in test mode, subsetting to one or more gene intervals. Pass one"
+            " or more 'GENE_NAME=INTERVAL' pairs, e.g. '--test"
+            " PCSK9=chr1:55039447-55064852 PCNT=chr21:46324141-46445769', to run"
+            " different genes in separate job submissions or together in one. Gene"
+            " names are appended to output filenames so runs don't overwrite each"
+            f" other. If given with no values, defaults to {default_test_genes_str}."
+        ),
+        nargs="*",
+        metavar="GENE_NAME=INTERVAL",
+        default=None,
     )
 
     sample_filter_args = parser.add_argument_group(
