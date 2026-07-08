@@ -50,6 +50,15 @@ logger.setLevel(logging.INFO)
 
 MAX_MNV_DISTANCE = 2
 
+CLASSIFY_N_PARTITIONS = 500
+"""Default number of partitions to repartition to before classification.
+
+Each row carries an entry per sample in the cohort, so the classification step
+(which builds nested per-entry MNV-pair arrays) is memory-heavy per row.
+Spreading the (already scan-filtered, typically small) row count across more
+partitions keeps any single task from exceeding Hail's off-heap memory limit.
+"""
+
 DEFAULT_TEST_GENES = [
     # PCNT on GRCh38.
     ("PCNT", "chr21:46324141-46445769"),
@@ -77,6 +86,13 @@ def _get_biallelic_snv(entry: hl.expr.StructExpression) -> hl.expr.StructExpress
     Uses the entry's LA (local alleles) array to map from the local alt allele
     index to the global allele index, then constructs a biallelic ``[ref, alt]``
     representation.
+
+    .. note::
+
+        Called once per non-ref entry at localization time (see
+        :func:`discover_mnv`), not per candidate pair, so the full (possibly
+        multiallelic) row ``alleles`` array never needs to be carried on every
+        sample's entry through the scan window.
 
     :param entry: Entry expression with ``LGT``, ``LA``, and ``_alleles`` fields.
     :return: Struct with ``alleles`` (array<str>) and ``is_snp`` (bool).
@@ -151,7 +167,8 @@ def _scan_for_candidates(ht: hl.Table, max_distance: int) -> hl.Table:
     candidate MNV pair.
 
     :param ht: Localized Table (from ``mt._localize_entries``). Entries must
-        contain ``LGT`` and ``_alleles``.
+        contain ``LGT`` (and typically a precomputed ``_biallelic`` field,
+        carried opaquely through the window for use in classification).
     :param max_distance: Maximum bp distance between two SNVs.
     :return: Filtered localized Table with ``prev`` annotated on each entry.
     """
@@ -229,12 +246,15 @@ def _classify_mnv_pairs(ht: hl.Table) -> hl.Table:
     """Classify MNV pairs from scan results and explode into one row per pair.
 
     For each entry with a defined ``prev`` window, classifies all pairs using
-    :func:`_classify_genotype_pair` and extracts biallelic alleles using
-    :func:`_get_biallelic_snv`. Filters to pairs where both carried alleles are
-    SNPs and at least one classification matches.
+    :func:`_classify_genotype_pair` and reads the biallelic alleles from each
+    entry's precomputed ``_biallelic`` field (set once per non-ref entry at
+    localization time in :func:`discover_mnv`, rather than recomputed per
+    pair). Filters to pairs where both carried alleles are SNPs and at least
+    one classification matches.
 
     :param ht: Localized Table with ``prev`` annotated on entries (output of
-        :func:`_scan_for_candidates`).
+        :func:`_scan_for_candidates`). Entries must carry a ``_biallelic``
+        field (struct with ``alleles`` and ``is_snp``).
     :return: Table with one ``_mnv`` struct per row (after checkpoint + explode).
     """
     _mnv_pair_type = hl.tstruct(
@@ -248,30 +268,22 @@ def _classify_mnv_pairs(ht: hl.Table) -> hl.Table:
 
     def _build_pair_record(entry, prev_tuple):
         """Build an MNV pair struct for one (current, previous) entry pair."""
-        cur_snv = _get_biallelic_snv(entry)
-        # Two levels of hl.bind: outer binds prev_tuple[1] (the entry struct
-        # from the window tuple) to prev_e; inner binds the biallelic SNV and
-        # genotype classification so they're computed once and shared across
-        # the struct fields.
+        prev_e = prev_tuple[1]
         return hl.bind(
-            lambda prev_e: hl.bind(
-                lambda prev_snv, gt_class: hl.struct(
-                    prev_locus=prev_tuple[0],
-                    prev_alleles=prev_snv.alleles,
-                    cur_alleles=cur_snv.alleles,
-                    is_hethet=gt_class.is_hethet,
-                    is_homhom=gt_class.is_homhom,
-                    is_hethom=gt_class.is_hethom,
-                ),
-                _get_biallelic_snv(prev_e),
-                _classify_genotype_pair(entry, prev_e),
+            lambda gt_class: hl.struct(
+                prev_locus=prev_tuple[0],
+                prev_alleles=prev_e._biallelic.alleles,
+                cur_alleles=entry._biallelic.alleles,
+                is_hethet=gt_class.is_hethet,
+                is_homhom=gt_class.is_homhom,
+                is_hethom=gt_class.is_hethom,
             ),
-            prev_tuple[1],
+            _classify_genotype_pair(entry, prev_e),
         )
 
     def _classify_entry(entry):
         """Classify all MNV pairs for one entry with a defined prev window."""
-        cur_is_snp = _get_biallelic_snv(entry).is_snp
+        cur_is_snp = entry._biallelic.is_snp
         return entry.prev.map(
             lambda prev_tuple: _build_pair_record(entry, prev_tuple)
         ).filter(
@@ -356,6 +368,7 @@ def discover_mnv(
     vds: hl.vds.VariantDataset,
     max_distance: int = MAX_MNV_DISTANCE,
     entries_to_keep: List[str] = MNV_ENTRIES_TO_KEEP,
+    classify_n_partitions: Optional[int] = None,
 ) -> hl.Table:
     """Run single-pass MNV discovery on an unsplit VDS.
 
@@ -367,12 +380,12 @@ def discover_mnv(
     Pipeline:
 
     1. **Scan** (:func:`_scan_for_candidates`): Unfilter entries, localize,
-       annotate with row alleles, scan using ``hl.scan.fold`` tracking a
-       sliding window of non-ref entries per sample. Filter to rows with
-       candidate MNV pairs.
+       precompute each non-ref entry's biallelic alleles, scan using
+       ``hl.scan.fold`` tracking a sliding window of non-ref entries per
+       sample. Filter to rows with candidate MNV pairs.
     2. **Classify** (:func:`_classify_mnv_pairs`): For each candidate, use
-       LGT/LPGT directly for classification (het-het / hom-hom / het-hom).
-       Extract biallelic alleles via LA indexing for the aggregation key.
+       LGT/LPGT directly for classification (het-het / hom-hom / het-hom) and
+       read the precomputed biallelic alleles for the aggregation key.
     3. **Aggregate** (:func:`_aggregate_mnv_pairs`): Group by variant pair
        across all samples.
 
@@ -387,6 +400,16 @@ def discover_mnv(
     :param max_distance: Maximum bp distance between SNVs to consider as an MNV.
         Default is 2 (codon reading frame).
     :param entries_to_keep: Entry fields needed for MNV discovery.
+    :param classify_n_partitions: If set, repartition (with a shuffle) to this
+        many partitions before the classification step. Default is None (no
+        repartition).
+
+        .. warning::
+
+            This triggers a shuffle of the fully-widened, one-entry-per-sample
+            table. Safe for small (e.g. ``--test``) row counts, but likely too
+            expensive/memory-heavy for a full-cohort, genome/exome-wide run —
+            leave unset there.
     :return: Hail Table of MNV pairs with per-pair counts.
     """
     mt = vds.variant_data
@@ -408,15 +431,31 @@ def discover_mnv(
     logger.info("Localizing and scanning for MNV candidates (single-pass)...")
     mt = mt.unfilter_entries()
     ht = mt._localize_entries("__entries", "__cols")
-    # Carry the row's alleles into each entry struct so that previous entries
-    # stored in the scan window retain their original row's alleles (needed
-    # for biallelic allele extraction in the classification step).
+    # Precompute each non-ref entry's biallelic (ref, alt) alleles + SNP status
+    # once here (guarded to non-ref entries, missing otherwise), then drop LA.
+    # This keeps the full (possibly multiallelic) row alleles array from being
+    # duplicated onto every sample's entry and carried through the scan
+    # window, which was blowing up per-task memory during classification.
     ht = ht.annotate(
-        __entries=ht.__entries.map(lambda e: e.annotate(_alleles=ht.alleles))
+        __entries=ht.__entries.map(
+            lambda e: e.annotate(
+                _biallelic=hl.or_missing(
+                    _is_nonref(e),
+                    _get_biallelic_snv(e.annotate(_alleles=ht.alleles)),
+                )
+            ).drop("LA")
+        )
     )
 
-    # Scan → classify → aggregate.
+    # Scan → repartition (test mode only) → classify → aggregate.
     ht = _scan_for_candidates(ht, max_distance)
+
+    if classify_n_partitions is not None:
+        logger.info(
+            "Repartitioning to %d partitions before classification...",
+            classify_n_partitions,
+        )
+        ht = ht.repartition(classify_n_partitions, shuffle=True)
 
     logger.info("Classifying MNV pairs...")
     ht = _classify_mnv_pairs(ht)
@@ -515,10 +554,14 @@ def main(args: argparse.Namespace) -> None:
         )
 
         # --- Run discovery (single-pass scan + classify + aggregate). ---
+        # Repartitioning before classification shuffles the fully-widened
+        # (one-entry-per-sample) table, so it's only safe to do at --test
+        # scale; skip it for full-cohort runs.
         mnv_ht = discover_mnv(
             vds,
             max_distance=args.max_distance,
             entries_to_keep=MNV_ENTRIES_TO_KEEP,
+            classify_n_partitions=args.classify_n_partitions if test_enabled else None,
         )
 
         # --- Write discovery output. ---
@@ -615,6 +658,20 @@ if __name__ == "__main__":
         ),
         type=int,
         default=MAX_MNV_DISTANCE,
+    )
+    detection_args.add_argument(
+        "--classify-n-partitions",
+        help=(
+            "Number of partitions to repartition to before the classification"
+            " step, which builds nested per-entry MNV-pair arrays and is"
+            " memory-heavy per row (each row carries an entry per cohort"
+            " sample). Only applied when --test is set, since it shuffles the"
+            " fully-widened table and is too expensive for a full-cohort run."
+            " Increase this if you hit a Hail off-heap memory error during a"
+            f" test run's classification step. Default is {CLASSIFY_N_PARTITIONS}."
+        ),
+        type=int,
+        default=CLASSIFY_N_PARTITIONS,
     )
 
     args = parser.parse_args()
