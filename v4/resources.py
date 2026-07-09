@@ -3,12 +3,20 @@
 from typing import List, Optional, Union
 
 import hail as hl
-from gnomad.resources.resource_utils import TableResource
+from gnomad.resources.resource_utils import TableResource, VariantDatasetResource
 
 CURRENT_VERSION = "4.1"
 
 MNV_ENTRIES_TO_KEEP = ["GT", "PGT", "PID"]
 """Entry fields needed for MNV discovery (global names, post-split)."""
+
+UKB_VDS = VariantDatasetResource("gs://gnomad/v4.0/raw/exomes/gnomad_v4.0.ukb.vds")
+"""UKB-only subset of the gnomAD v4 exomes VDS.
+
+Written by ``gnomad_qc.v4.split_ukb_vds`` from
+``get_gnomad_v4_vds(remove_hard_filtered_samples=False)`` filtered to the columns
+whose sample ID (``s``) starts with ``"UKB"``.
+"""
 
 
 def _mnv_root_path(
@@ -49,6 +57,7 @@ def mnv_discovery(
     test: bool = False,
     data_type: str = "exomes",
     test_genes: Optional[List[str]] = None,
+    ukb_only: bool = False,
 ) -> TableResource:
     """Get the MNV discovery TableResource.
 
@@ -62,12 +71,16 @@ def mnv_discovery(
     :param test_genes: Optional list of gene names tested (``test`` must be True).
         Appended to the output filename so that multiple test runs, e.g. for
         different genes, don't overwrite each other's output.
+    :param ukb_only: Whether the run used the UKB-only VDS subset. Adds a
+        ``.ukb_only`` filename component so UKB output doesn't overwrite
+        full-cohort output. Default is False.
     :return: TableResource for MNV discovery output.
     """
     return TableResource(
         path=(
             f"{_mnv_root_path(version, test, data_type)}"
             f"/gnomad.{data_type}.v{version}.mnv_discovery"
+            f"{'.ukb_only' if ukb_only else ''}"
             f"{_test_gene_suffix(test, test_genes)}.ht"
         )
     )
@@ -78,6 +91,7 @@ def mnv_annotated(
     test: bool = False,
     data_type: str = "exomes",
     test_genes: Optional[List[str]] = None,
+    ukb_only: bool = False,
 ) -> TableResource:
     """Get the annotated MNV TableResource.
 
@@ -91,12 +105,16 @@ def mnv_annotated(
     :param test_genes: Optional list of gene names tested (``test`` must be True).
         Appended to the output filename so that multiple test runs, e.g. for
         different genes, don't overwrite each other's output.
+    :param ukb_only: Whether the run used the UKB-only VDS subset. Adds a
+        ``.ukb_only`` filename component so UKB output doesn't overwrite
+        full-cohort output. Default is False.
     :return: TableResource for annotated MNV output.
     """
     return TableResource(
         path=(
             f"{_mnv_root_path(version, test, data_type)}"
             f"/gnomad.{data_type}.v{version}.mnv_annotated"
+            f"{'.ukb_only' if ukb_only else ''}"
             f"{_test_gene_suffix(test, test_genes)}.ht"
         )
     )
@@ -128,3 +146,51 @@ def get_gnomad_v4_vds(
         high_quality_only=high_quality_only,
         release_only=release_only,
     )
+
+
+def get_gnomad_v4_ukb_vds(
+    filter_intervals: Optional[List[Union[str, hl.tinterval]]] = None,
+    high_quality_only: bool = False,
+    release_only: bool = False,
+) -> hl.vds.VariantDataset:
+    """Load the UKB-only gnomAD v4 VDS subset (unsplit) with sample filtering.
+
+    Drop-in replacement for :func:`get_gnomad_v4_vds` that reads the pre-built
+    :data:`UKB_VDS` subset instead of the full v4 VDS. Because the subset is a raw
+    VDS (not produced by the gnomad_qc loader), interval and sample filtering are
+    applied here by hand to mirror what ``gnomad_qc.v4.resources.basics.get_gnomad_v4_vds``
+    does internally.
+
+    :param filter_intervals: Optional list of intervals to filter the VDS to before
+        returning. Accepts strings (e.g., ``"chr1:55039447-55064852"``) or
+        ``hl.tinterval`` objects.
+    :param high_quality_only: Whether to filter to only high-quality samples. Default
+        is False.
+    :param release_only: Whether to filter to only release samples. Default is False.
+    :return: Unsplit UKB-only gnomAD v4 VariantDataset.
+    """
+    from gnomad_qc.v4.resources.meta import meta
+    from gnomad_qc.v4.resources.sample_qc import hard_filtered_samples
+
+    vds = UKB_VDS.vds()
+
+    if filter_intervals:
+        if isinstance(filter_intervals[0], str):
+            filter_intervals = [
+                hl.parse_locus_interval(x, reference_genome="GRCh38")
+                for x in filter_intervals
+            ]
+        vds = hl.vds.filter_intervals(
+            vds, filter_intervals, split_reference_blocks=True
+        )
+
+    if release_only:
+        meta_ht = meta().ht()
+        vds = hl.vds.filter_samples(vds, meta_ht.filter(meta_ht.release))
+    elif high_quality_only:
+        meta_ht = meta().ht()
+        vds = hl.vds.filter_samples(vds, meta_ht.filter(meta_ht.high_quality))
+    else:
+        vds = hl.vds.filter_samples(vds, hard_filtered_samples.ht(), keep=False)
+
+    return vds

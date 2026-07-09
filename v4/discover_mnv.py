@@ -22,6 +22,8 @@ Usage::
     python -m v4.discover_mnv --discover --annotate --test
     python -m v4.discover_mnv --discover --annotate --test \\
         PCSK9=chr1:55039447-55064852 PCNT=chr21:46324141-46445769
+    python -m v4.discover_mnv --discover --chromosome 21 --overwrite
+    python -m v4.discover_mnv --discover --ukb-only --overwrite
 """
 
 import argparse
@@ -30,12 +32,12 @@ import time
 from typing import List, Optional, Tuple
 
 import hail as hl
-
 from gnomad.resources.grch38.gnomad import public_release
 from gnomad_qc.v4.resources.annotations import get_vep
 
 from v4.resources import (
     MNV_ENTRIES_TO_KEEP,
+    get_gnomad_v4_ukb_vds,
     get_gnomad_v4_vds,
     mnv_annotated,
     mnv_discovery,
@@ -170,7 +172,9 @@ def _scan_for_candidates(ht: hl.Table, max_distance: int) -> hl.Table:
         contain ``LGT`` (and typically a precomputed ``_biallelic`` field,
         carried opaquely through the window for use in classification).
     :param max_distance: Maximum bp distance between two SNVs.
-    :return: Filtered localized Table with ``prev`` annotated on each entry.
+    :return: Filtered localized Table with ``prev`` annotated on each entry,
+        checkpointed to a temporary path (spilled to GCS rather than held in
+        memory, since the widened one-entry-per-sample table can be large).
     """
     # Typed missing value representing "no window state". The window is an
     # array of (locus, entry) tuples. Using missing (rather than empty array)
@@ -239,7 +243,12 @@ def _scan_for_candidates(ht: hl.Table, max_distance: int) -> hl.Table:
         ),
     )
 
-    return ht.filter(hl.any(ht.__entries.map(lambda x: hl.is_defined(x.prev)))).cache()
+    # Checkpoint (rather than .cache()) the widened, scan-filtered table: it
+    # carries one entry per cohort sample, so holding it in executor memory
+    # risks OOM at chromosome/full-cohort scale. Spilling to GCS trades a
+    # write/read round-trip for bounded memory.
+    ht = ht.filter(hl.any(ht.__entries.map(lambda x: hl.is_defined(x.prev))))
+    return ht.checkpoint(hl.utils.new_temp_file("mnv_scan_candidates", "ht"))
 
 
 def _classify_mnv_pairs(ht: hl.Table) -> hl.Table:
@@ -357,6 +366,16 @@ def _parse_test_genes(values: List[str]) -> List[Tuple[str, str]]:
         name, interval = value.split("=", 1)
         parsed.append((name, interval))
     return parsed
+
+
+def _normalize_chrom(value: str) -> str:
+    """Normalize a chromosome argument to a ``chrN`` contig name.
+
+    :param value: Chromosome as a number/letter (e.g. ``"21"``, ``"X"``) or an
+        already-prefixed contig name (e.g. ``"chr21"``).
+    :return: GRCh38 contig name, e.g. ``"chr21"`` or ``"chrX"``.
+    """
+    return value if value.lower().startswith("chr") else f"chr{value}"
 
 
 # ---------------------------------------------------------------------------
@@ -523,31 +542,45 @@ def main(args: argparse.Namespace) -> None:
         tmp_dir="gs://gnomad-tmp-4day/discover_mnv",
     )
 
-    # ``args.test`` is None when --test is omitted, [] when given with no values
-    # (use the default test gene(s)), or a list of "GENE_NAME=INTERVAL" strings.
-    test_enabled = args.test is not None
-    test_genes: List[Tuple[str, str]] = []
-    if test_enabled:
-        test_genes = _parse_test_genes(args.test) if args.test else DEFAULT_TEST_GENES
-    gene_names: Optional[List[str]] = (
-        [name for name, _ in test_genes] if test_enabled else None
-    )
-    intervals: Optional[List[str]] = (
-        [interval for _, interval in test_genes] if test_enabled else None
-    )
+    # Test mode is enabled by either --test (gene intervals) or --chromosome (a
+    # single whole chromosome); the two are mutually exclusive (enforced in the
+    # arg parser). ``args.test`` is None when --test is omitted, [] when given
+    # with no values (use the default test gene(s)), or a list of
+    # "GENE_NAME=INTERVAL" strings.
+    test_enabled = args.test is not None or args.chromosome is not None
+    gene_names: Optional[List[str]] = None
+    intervals: Optional[List[str]] = None
+    if args.chromosome is not None:
+        chrom = _normalize_chrom(args.chromosome)
+        # Reuse the gene-label suffix machinery: label the run by contig name so
+        # the output path is e.g. ...mnv_discovery.test_chr21.ht.
+        gene_names = [chrom]
+        intervals = [chrom]
+    elif args.test is not None:
+        test_genes: List[Tuple[str, str]] = (
+            _parse_test_genes(args.test) if args.test else DEFAULT_TEST_GENES
+        )
+        gene_names = [name for name, _ in test_genes]
+        intervals = [interval for _, interval in test_genes]
 
     if args.discover:
         if test_enabled:
             logger.info(
                 "Running in test mode, subsetting to %s...",
-                ", ".join(f"{name} ({interval})" for name, interval in test_genes),
+                ", ".join(
+                    f"{name} ({interval})"
+                    for name, interval in zip(gene_names, intervals)
+                ),
             )
         else:
             logger.info("Starting MNV discovery.")
+        if args.ukb_only:
+            logger.info("Using the UKB-only VDS subset.")
         start = time.time()
 
         # --- Load unsplit VDS, optionally filtering to test intervals. ---
-        vds = get_gnomad_v4_vds(
+        vds_loader = get_gnomad_v4_ukb_vds if args.ukb_only else get_gnomad_v4_vds
+        vds = vds_loader(
             filter_intervals=intervals,
             high_quality_only=args.high_quality_only,
             release_only=args.release_only,
@@ -555,17 +588,23 @@ def main(args: argparse.Namespace) -> None:
 
         # --- Run discovery (single-pass scan + classify + aggregate). ---
         # Repartitioning before classification shuffles the fully-widened
-        # (one-entry-per-sample) table, so it's only safe to do at --test
-        # scale; skip it for full-cohort runs.
+        # (one-entry-per-sample) table, so it's only safe at --test (gene
+        # interval) scale. A --chromosome run is a spatial subset of the full
+        # run and, like the full run, relies on native partitioning + the
+        # dedup-alleles step instead of a shuffle, so it is NOT repartitioned.
         mnv_ht = discover_mnv(
             vds,
             max_distance=args.max_distance,
             entries_to_keep=MNV_ENTRIES_TO_KEEP,
-            classify_n_partitions=args.classify_n_partitions if test_enabled else None,
+            classify_n_partitions=(
+                args.classify_n_partitions if args.test is not None else None
+            ),
         )
 
         # --- Write discovery output. ---
-        discovery_resource = mnv_discovery(test=test_enabled, test_genes=gene_names)
+        discovery_resource = mnv_discovery(
+            test=test_enabled, test_genes=gene_names, ukb_only=args.ukb_only
+        )
         logger.info("Writing MNV discovery results to %s.", discovery_resource.path)
         mnv_ht.write(discovery_resource.path, overwrite=args.overwrite)
 
@@ -574,10 +613,14 @@ def main(args: argparse.Namespace) -> None:
 
     if args.annotate:
         logger.info("Annotating MNV pairs with frequency and VEP data...")
-        mnv_ht = mnv_discovery(test=test_enabled, test_genes=gene_names).ht()
+        mnv_ht = mnv_discovery(
+            test=test_enabled, test_genes=gene_names, ukb_only=args.ukb_only
+        ).ht()
         mnv_ht = annotate_mnv(mnv_ht)
 
-        annotated_resource = mnv_annotated(test=test_enabled, test_genes=gene_names)
+        annotated_resource = mnv_annotated(
+            test=test_enabled, test_genes=gene_names, ukb_only=args.ukb_only
+        )
         logger.info("Writing annotated MNV results to %s.", annotated_resource.path)
         mnv_ht.write(annotated_resource.path, overwrite=args.overwrite)
 
@@ -630,6 +673,20 @@ if __name__ == "__main__":
         metavar="GENE_NAME=INTERVAL",
         default=None,
     )
+    parser.add_argument(
+        "--chromosome",
+        help=(
+            "Run discovery on a single whole chromosome (a test run). Pass a"
+            " chromosome number/letter, e.g. '--chromosome 21' or '--chromosome"
+            " X'; it is normalized to a 'chrN' contig name. Writes to the testing"
+            " bucket with a '.test_<chrom>' suffix and does NOT repartition before"
+            " classification (a chromosome is a spatial subset of the full run,"
+            " which runs without the shuffle). Cannot be combined with --test."
+        ),
+        type=str,
+        metavar="CHROM",
+        default=None,
+    )
 
     sample_filter_args = parser.add_argument_group(
         "Sample filtering",
@@ -643,6 +700,15 @@ if __name__ == "__main__":
     sample_filter_args.add_argument(
         "--release-only",
         help="Filter to only release samples.",
+        action="store_true",
+    )
+    sample_filter_args.add_argument(
+        "--ukb-only",
+        help=(
+            "Run discovery on the UKB-only VDS subset instead of the full v4 VDS."
+            " Output filenames get a '.ukb_only' component so they don't collide"
+            " with full-cohort output."
+        ),
         action="store_true",
     )
 
@@ -677,4 +743,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if not args.discover and not args.annotate:
         parser.error("At least one of --discover or --annotate is required.")
+    if args.test is not None and args.chromosome is not None:
+        parser.error(
+            "--chromosome cannot be combined with --test; --chromosome is a"
+            " standalone single-chromosome test run."
+        )
     main(args)
