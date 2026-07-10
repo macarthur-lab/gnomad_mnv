@@ -526,8 +526,9 @@ def discover_mnv(
        hom-alt depletion hotfix (high-AB het-ref at common variants → hom-alt,
        skipping het_non_ref and fixed-hom-alt-model samples) → sex-ploidy
        adjustment → adj annotation.
-    1. **Scan** (:func:`_scan_for_candidates`): Unfilter entries, localize,
-       build each non-ref entry's per-carried-alt records (``_alts``), scan
+    1. **Scan** (:func:`_scan_for_candidates`): Localize (no densify — the scan
+       treats missing and 0/0 entries alike), build each non-ref entry's
+       per-carried-alt records (``_alts``), scan
        using ``hl.scan.fold`` tracking a sliding window of non-ref entries per
        sample. Filter to rows with candidate MNV pairs.
     2. **Classify** (:func:`_classify_mnv_pairs`): For each candidate, classify
@@ -633,10 +634,12 @@ def discover_mnv(
     # (4) Annotate adj on the fully adjusted GT (ploidy-aware DP thresholds).
     mt = mt.annotate_entries(adj=get_adj_expr(mt.LGT, mt.GQ, mt.DP, mt.LAD))
 
-    # Unfilter sparse entries (fills in ref-block-covered positions with
-    # LGT=0/0), then localize to a Table for scan-based processing.
+    # Localize to a Table for scan-based processing. No unfilter_entries /
+    # densify step is needed: the scan treats a missing entry identically to
+    # 0/0 (both "not non-ref"), so leaving hom-ref entries sparse yields the
+    # same MNV results while avoiding materializing a 0/0 for every sample at
+    # every site (verified equivalent on synthetic data).
     logger.info("Localizing and scanning for MNV candidates (single-pass)...")
-    mt = mt.unfilter_entries()
     ht = mt._localize_entries("__entries", "__cols")
     # Build per-carried-alt records once per non-ref entry (guarded to non-ref,
     # missing otherwise), reading the row alleles here so the multiallelic

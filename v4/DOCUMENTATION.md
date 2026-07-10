@@ -88,19 +88,20 @@ for `sparse_split_multi`.
    het_non_ref and `fixed_homalt_model` samples; (c) `adjusted_sex_ploidy_expr` (no-op on
    autosomes); (d) `adj = get_adj_expr(LGT, GQ, DP, LAD)`. Sex karyotype and the hom-alt
    model flag come from `meta()`.
-6. **Unfilter**: `mt.unfilter_entries()` — fills ref-block-covered positions with
-   LGT=0/0 so the scan sees every row for every sample.
-7. **Localize + build `_alts`**: `mt._localize_entries()` — convert to Table (required to
-   avoid Hail's `KeyError: 'agg_capability'` IR bug with entry-level scans). Each non-ref
-   entry gets `_alts`: one record per distinct carried alt (`alleles`, `is_snp`,
-   `is_hom`, `hap`), ploidy-safe. Keep only LGT, PID, adj, `_alts` per entry.
-8. **Scan** (`_scan_for_candidates`): Per-sample `hl.scan.fold` tracks a sliding window
+6. **Localize + build `_alts`**: `mt._localize_entries()` — convert to Table (required to
+   avoid Hail's `KeyError: 'agg_capability'` IR bug with entry-level scans). No
+   `unfilter_entries`/densify (see below). Each non-ref entry gets `_alts`: one record per
+   distinct carried alt (`alleles`, `is_snp`, `is_hom`, `hap`), ploidy-safe. Keep only
+   LGT, PID, adj, `_alts` per entry.
+7. **Scan** (`_scan_for_candidates`): Per-sample `hl.scan.fold` tracks a sliding window
    of recent non-ref entries. Each entry stores `(locus, entry_struct)`. The window is
    pruned by distance and contig at each row.
-9. **Classify** (`_classify_mnv_pairs`): For each entry with a defined prev window,
-   classify every `cur._alts × prev._alts` alt pair; a pair's `adj` = both entries' adj.
-10. **Aggregate** (`_aggregate_mnv_pairs`): `group_by(locus, alleles, prev_locus,
-    prev_alleles)` across all samples, emitting raw and `_adj` counts.
+8. **Classify** (`_classify_mnv_pairs`): Filter to candidate carriers (entries with a
+   `prev` window), `explode` to one row per carrier, then classify every
+   `cur._alts × prev._alts` alt pair; a pair's `adj` = both entries' adj. Exploding
+   before building pair arrays bounds per-task memory (no classify repartition needed).
+9. **Aggregate** (`_aggregate_mnv_pairs`): `group_by(locus, alleles, prev_locus,
+   prev_alleles)` across all samples, emitting raw and `_adj` counts.
 
 ### Why local allele space works
 
@@ -226,13 +227,16 @@ this misses the (P, P+2) pair when a sample has non-ref variants at P, P+1, and 
 (the scan at P+2 sees P+1, not P). The fold-based scan maintains a window of all recent
 non-ref entries within range, catching all valid pairs.
 
-### Why `unfilter_entries()`?
+### Why no `unfilter_entries()` / densify?
 
-The sparse VDS only stores entries at variant sites (non-ref calls) and ref block
-boundaries. Without unfiltering, the scan might carry stale state across gaps where a
-sample has ref-block coverage but no stored entry. `unfilter_entries()` fills in
-LGT=0/0 at ref-block-covered positions, ensuring the scan sees every row and can
-correctly prune the window by distance.
+The sparse VDS only stores entries at variant sites (non-ref calls). Densifying hom-ref
+positions to `LGT=0/0` is **not needed**: the scan classifies a *missing* entry exactly
+like `0/0` (both fail `_is_nonref`), and the window is pruned by comparing each stored
+entry's locus to the **current row's** locus — not by intervening rows — so a stale
+entry is dropped at the first row beyond `max_distance` regardless of what lies between.
+Verified on synthetic data that dense (`0/0`), sparse+unfilter, and sparse-without-unfilter
+produce byte-identical MNV output. Skipping the densify avoids materializing a `0/0` for
+every sample at every site.
 
 ### PGT is a Call after split (but we don't split)
 

@@ -208,7 +208,8 @@ After `hl.experimental.sparse_split_multi()`:
    het_non_ref and samples with `meta.project_meta.fixed_homalt_model`. Sex karyotype
    comes from `meta.sex_imputation.sex_karyotype`. These add release-HT + meta joins to
    the discovery step (previously only `--annotate` touched the release HT).
-1. **Localize + scan**: `unfilter_entries()` → `_localize_entries` → build per-entry
+1. **Localize + scan**: `_localize_entries` (no `unfilter_entries`/densify — the scan
+   treats a missing entry the same as 0/0, verified equivalent) → build per-entry
    `_alts` (one record per distinct carried alt: `alleles`, `is_snp`, `is_hom`, `hap`) →
    `hl.scan.array_agg` + `hl.scan.fold` with `hl.case()` branching to track a window of
    recent non-ref `(locus, entry)` tuples per sample. Window uses missing state (not
