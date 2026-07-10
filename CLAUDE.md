@@ -194,20 +194,39 @@ After `hl.experimental.sparse_split_multi()`:
 
 `--discover` uses a single-pass architecture with `hl.scan.fold` + `hl.case()` branching:
 
-1. **Localize + scan**: `unfilter_entries()` → `_localize_entries` → annotate entries
-   with row alleles → `hl.scan.array_agg` + `hl.scan.fold` with `hl.case()` branching
-   to track a window of recent non-ref `(locus, entry)` tuples per sample. Window uses
-   missing state (not empty array) to distinguish "no data" from "no nearby variants".
-   Filter to rows where any sample has a candidate MNV pair.
-2. **Classify**: For each candidate, use LGT/LPGT directly (valid in local allele space)
-   for het-het / hom-hom / het-hom classification. Extract biallelic alleles via
-   `entry.LA[max(LGT[0], LGT[1])]` indexing into the stored `_alleles`. Filter to pairs
-   where both carried alleles are SNPs.
+0a. **Drop junk sites**: drop unsplit sites where every alt is `AS_lowqual` (from the
+   unsplit info HT, `get_info(split=False)`; `AS_lowqual` is `array<bool>` over alts, so
+   all-lowqual = `hl.all(...)`). Release-excluded, can't be a real MNV; a row-only filter
+   that shrinks the widened table. The info HT is re-read with the variant_data's
+   partition intervals (`_calculate_new_partitions` + `_intervals`) so the join needs no
+   shuffle.
+0b. **Adjust genotypes** (on the MT, before localizing), in gnomAD QC's canonical order
+   (see `gnomad_qc/v3/create_release/create_hgdp_tgp_subset.py`): flag `_het_non_ref` →
+   hom-alt depletion hotfix → `adjusted_sex_ploidy_expr` → `get_adj_expr` (adj). The
+   hotfix reclassifies a high-AB (>0.9) het-ref call at a common variant (release
+   `public_release("exomes").freq[0].AF` > 0.01, joined per-alt) to hom-alt, skipping
+   het_non_ref and samples with `meta.project_meta.fixed_homalt_model`. Sex karyotype
+   comes from `meta.sex_imputation.sex_karyotype`. These add release-HT + meta joins to
+   the discovery step (previously only `--annotate` touched the release HT).
+1. **Localize + scan**: `unfilter_entries()` → `_localize_entries` → build per-entry
+   `_alts` (one record per distinct carried alt: `alleles`, `is_snp`, `is_hom`, `hap`) →
+   `hl.scan.array_agg` + `hl.scan.fold` with `hl.case()` branching to track a window of
+   recent non-ref `(locus, entry)` tuples per sample. Window uses missing state (not
+   empty array) to distinguish "no data" from "no nearby variants". Filter to rows where
+   any sample has a candidate MNV pair.
+2. **Classify**: For each candidate, classify every `cur._alts × prev._alts` alt pair.
+   het-het = both het, phased, same PID, same `hap` (cis); hom-hom = both hom; het-hom =
+   exactly one hom. het_non_ref (`1/2`) contributes both alts (each its own hap). A pair
+   is adj if both constituent entry `adj` flags pass. Filter to pairs where both carried
+   alleles are SNPs.
 3. **Aggregate**: Checkpoint → explode → `group_by(locus, alleles, prev_locus,
-   prev_alleles)` → aggregate n_hethet, n_homhom, n_hethom, n_total.
+   prev_alleles)` → aggregate raw `n_hethet/n_homhom/n_hethom/n_total` plus `_adj`
+   variants (`n_hethet_adj`, etc.).
 
 No `sparse_split_multi` or unlocalize step is needed — biallelic alleles are extracted
-inline via LA indexing, and LGT/LPGT classification is valid in local allele space.
+inline via LA indexing, and het/hom + haplotype classification is valid in local allele
+space. `_alts` allele extraction is ploidy-safe (LGT may be haploid on X/Y post
+sex-ploidy adjustment).
 
 `--annotate`: Read discovery HT → join AC/AF/filters from `public_release("exomes")` +
 VEP from `get_vep("exomes")` → write annotated HT.

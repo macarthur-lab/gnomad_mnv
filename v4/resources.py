@@ -7,8 +7,13 @@ from gnomad.resources.resource_utils import TableResource, VariantDatasetResourc
 
 CURRENT_VERSION = "4.1"
 
-MNV_ENTRIES_TO_KEEP = ["GT", "PGT", "PID"]
-"""Entry fields needed for MNV discovery (global names, post-split)."""
+MNV_ENTRIES_TO_KEEP = ["GT", "PGT", "PID", "GQ", "DP", "AD"]
+"""Entry fields needed for MNV discovery (global names, post-split).
+
+GQ/DP/AD are used for the hom-alt depletion hotfix (allele balance) and adj
+genotype-quality filtering. The L-prefix loop in :func:`discover_mnv` maps
+GT->LGT, AD->LAD, PGT->LPGT and leaves GQ/DP/PID unchanged.
+"""
 
 UKB_VDS = VariantDatasetResource("gs://gnomad/v4.0/raw/exomes/gnomad_v4.0.ukb.vds")
 """UKB-only subset of the gnomAD v4 exomes VDS.
@@ -39,25 +44,25 @@ def _mnv_root_path(
     )
 
 
-def _test_gene_suffix(test: bool, test_genes: Optional[List[str]]) -> str:
-    """Build a filename suffix identifying the gene(s) used in a test run.
+def _interval_suffix(interval_names: Optional[List[str]]) -> str:
+    """Build a filename suffix labeling the interval(s) a run was scoped to.
 
-    :param test: Whether this is a test run. If False, no suffix is added.
-    :param test_genes: Optional list of gene names tested. If None or empty while
-        ``test`` is True, the suffix is ``.test`` (generic, no genes specified).
-    :return: Filename suffix, e.g. ``".test_PCSK9_PCNT"``, ``".test"``, or ``""``.
+    :param interval_names: Optional list of labels (gene names, or a single
+        contig name) for the intervals the run was filtered to. If None or empty,
+        no suffix is added.
+    :return: Filename suffix, e.g. ``".PCSK9_PCNT"``, ``".chr21"``, or ``""``.
     """
-    if not test:
-        return ""
-    return f".test_{'_'.join(test_genes)}" if test_genes else ".test"
+    return f".{'_'.join(interval_names)}" if interval_names else ""
 
 
 def mnv_discovery(
     version: str = CURRENT_VERSION,
     test: bool = False,
     data_type: str = "exomes",
-    test_genes: Optional[List[str]] = None,
+    interval_names: Optional[List[str]] = None,
     ukb_only: bool = False,
+    chrom: Optional[str] = None,
+    suffix: Optional[str] = None,
 ) -> TableResource:
     """Get the MNV discovery TableResource.
 
@@ -68,12 +73,17 @@ def mnv_discovery(
     :param test: Whether to use the testing output bucket. Default is False.
     :param data_type: Data type, either ``"exomes"`` or ``"genomes"``. Default is
         ``"exomes"``.
-    :param test_genes: Optional list of gene names tested (``test`` must be True).
-        Appended to the output filename so that multiple test runs, e.g. for
-        different genes, don't overwrite each other's output.
+    :param interval_names: Optional labels (gene names) for the intervals the run
+        was scoped to via ``--intervals``. Appended to the output filename so runs
+        over different intervals don't overwrite each other.
     :param ukb_only: Whether the run used the UKB-only VDS subset. Adds a
         ``.ukb_only`` filename component so UKB output doesn't overwrite
         full-cohort output. Default is False.
+    :param chrom: Optional contig name (e.g. ``"chr21"``) for a single-chromosome
+        run. Adds a ``.<chrom>`` filename component so each chromosome's output is
+        written to a distinct path. Default is None.
+    :param suffix: Optional free-form filename suffix (e.g. a username) appended
+        last, so a run doesn't overwrite anyone else's output. Default is None.
     :return: TableResource for MNV discovery output.
     """
     return TableResource(
@@ -81,7 +91,9 @@ def mnv_discovery(
             f"{_mnv_root_path(version, test, data_type)}"
             f"/gnomad.{data_type}.v{version}.mnv_discovery"
             f"{'.ukb_only' if ukb_only else ''}"
-            f"{_test_gene_suffix(test, test_genes)}.ht"
+            f"{'.' + chrom if chrom else ''}"
+            f"{_interval_suffix(interval_names)}"
+            f"{'.' + suffix if suffix else ''}.ht"
         )
     )
 
@@ -90,8 +102,10 @@ def mnv_annotated(
     version: str = CURRENT_VERSION,
     test: bool = False,
     data_type: str = "exomes",
-    test_genes: Optional[List[str]] = None,
+    interval_names: Optional[List[str]] = None,
     ukb_only: bool = False,
+    chrom: Optional[str] = None,
+    suffix: Optional[str] = None,
 ) -> TableResource:
     """Get the annotated MNV TableResource.
 
@@ -102,12 +116,17 @@ def mnv_annotated(
     :param test: Whether to use the testing output bucket. Default is False.
     :param data_type: Data type, either ``"exomes"`` or ``"genomes"``. Default is
         ``"exomes"``.
-    :param test_genes: Optional list of gene names tested (``test`` must be True).
-        Appended to the output filename so that multiple test runs, e.g. for
-        different genes, don't overwrite each other's output.
+    :param interval_names: Optional labels (gene names) for the intervals the run
+        was scoped to via ``--intervals``. Appended to the output filename so runs
+        over different intervals don't overwrite each other.
     :param ukb_only: Whether the run used the UKB-only VDS subset. Adds a
         ``.ukb_only`` filename component so UKB output doesn't overwrite
         full-cohort output. Default is False.
+    :param chrom: Optional contig name (e.g. ``"chr21"``) for a single-chromosome
+        run. Adds a ``.<chrom>`` filename component so each chromosome's output is
+        written to a distinct path. Default is None.
+    :param suffix: Optional free-form filename suffix (e.g. a username) appended
+        last, so a run doesn't overwrite anyone else's output. Default is None.
     :return: TableResource for annotated MNV output.
     """
     return TableResource(
@@ -115,7 +134,9 @@ def mnv_annotated(
             f"{_mnv_root_path(version, test, data_type)}"
             f"/gnomad.{data_type}.v{version}.mnv_annotated"
             f"{'.ukb_only' if ukb_only else ''}"
-            f"{_test_gene_suffix(test, test_genes)}.ht"
+            f"{'.' + chrom if chrom else ''}"
+            f"{_interval_suffix(interval_names)}"
+            f"{'.' + suffix if suffix else ''}.ht"
         )
     )
 
