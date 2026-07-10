@@ -309,20 +309,17 @@ def _classify_mnv_pairs(ht: hl.Table) -> hl.Table:
     pass adj. Filters to pairs where both carried alleles are SNPs and at least
     one classification matches.
 
+    Candidate carriers are exploded to one row per (site, carrier) **before**
+    the pair arrays are built, so per-task memory is bounded by a single
+    carrier's pairs rather than a per-row array across all samples (the
+    off-heap hotspot). The classification step therefore needs no repartition
+    even at full-cohort scale.
+
     :param ht: Localized Table with ``prev`` annotated on entries (output of
         :func:`_scan_for_candidates`). Entries must carry ``_alts`` (array of
         carried-alt records), ``PID``, and ``adj``.
     :return: Table with one ``_mnv`` struct per row (after checkpoint + explode).
     """
-    _mnv_pair_type = hl.tstruct(
-        prev_locus=hl.tlocus("GRCh38"),
-        prev_alleles=hl.tarray(hl.tstr),
-        cur_alleles=hl.tarray(hl.tstr),
-        is_hethet=hl.tbool,
-        is_homhom=hl.tbool,
-        is_hethom=hl.tbool,
-        adj=hl.tbool,
-    )
 
     def _build_pair_record(entry, prev_tuple, ca, pa):
         """Build an MNV pair struct for one (current alt, previous alt) pair."""
@@ -360,22 +357,16 @@ def _classify_mnv_pairs(ht: hl.Table) -> hl.Table:
             )
         )
 
-    # Flatten classified pairs across all samples into one array per row.
-    _mnv = hl.flatten(
-        ht.__entries.map(
-            lambda entry: hl.if_else(
-                hl.is_defined(entry.prev),
-                _classify_entry(entry),
-                hl.empty_array(_mnv_pair_type),
-            )
-        )
-    )
-    ht = ht.select(_mnv=_mnv)
-
-    # Filter, checkpoint, and explode to one row per MNV pair.
-    ht = ht.filter(hl.len(ht._mnv) > 0)
+    # Keep only candidate entries (those with a prev window), then explode to
+    # one row per (site, carrier) before building pair arrays so per-task
+    # memory stays bounded to a single carrier's pairs.
+    ht = ht.select(_cands=ht.__entries.filter(lambda e: hl.is_defined(e.prev)))
+    ht = ht.filter(hl.len(ht._cands) > 0)
     ht = ht.checkpoint(hl.utils.new_temp_file("mnv_scan_results", "ht"))
-    logger.info("Scan checkpoint complete, exploding MNV pairs...")
+    logger.info("Scan checkpoint complete, exploding candidate carriers...")
+    ht = ht.explode("_cands")
+    ht = ht.select(_mnv=_classify_entry(ht._cands))
+    ht = ht.filter(hl.len(ht._mnv) > 0)
     return ht.explode("_mnv")
 
 
