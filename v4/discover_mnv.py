@@ -122,12 +122,12 @@ def _get_carried_alts(entry: hl.expr.StructExpression) -> hl.expr.ArrayExpressio
         multiallelic) row ``alleles`` array never needs to be carried on every
         sample's entry through the scan window.
 
-    :param entry: Entry expression with ``LGT``, ``LPGT``, ``LA``, and
-        ``_alleles`` fields. ``LGT`` may be haploid (post sex-ploidy adjustment
+    :param entry: Entry expression with ``LGT``, ``LPGT``, ``LA``, ``_alleles``,
+        and ``_locus`` fields. ``LGT`` may be haploid (post sex-ploidy adjustment
         on sex chromosomes), so allele extraction is ploidy-safe.
-    :return: Array of structs, one per carried alt, each with ``alleles``
-        (array<str>), ``is_snp`` (bool), ``is_hom`` (bool), and ``hap``
-        (int32 or missing).
+    :return: Array of structs, one per carried alt, each with ``locus``
+        (min-repped), ``alleles`` (min-repped array<str>), ``is_snp`` (bool),
+        ``is_hom`` (bool), and ``hap`` (int32 or missing).
     """
     # Distinct carried alt local indices, ploidy-safe (LGT may be haploid on
     # non-PAR X/Y after sex-ploidy adjustment).
@@ -138,9 +138,15 @@ def _get_carried_alts(entry: hl.expr.StructExpression) -> hl.expr.ArrayExpressio
     )
     return carried.map(
         lambda li: hl.bind(
-            lambda alt: hl.struct(
-                alleles=hl.array([entry._alleles[0], alt]),
-                is_snp=hl.is_snp(entry._alleles[0], alt),
+            # Min-rep the biallelic [ref, alt] so the emitted (locus, alleles)
+            # matches the split/min-repped release HT — otherwise the alt carries
+            # multiallelic-site context (e.g. ["TCCGGG", "GCCGGG"]) and the
+            # release/VEP/hotfix-AF joins keyed on (locus, alleles) miss. min-rep
+            # returns both the (possibly shifted) locus and the trimmed alleles.
+            lambda mr: hl.struct(
+                locus=mr.locus,
+                alleles=mr.alleles,
+                is_snp=hl.is_snp(mr.alleles[0], mr.alleles[1]),
                 is_hom=entry.LGT.is_hom_var(),
                 # Haplotype index carrying this alt: the position h where
                 # LPGT[h] == li. ``find`` over the ploidy range is ploidy-safe
@@ -151,7 +157,10 @@ def _get_carried_alts(entry: hl.expr.StructExpression) -> hl.expr.ArrayExpressio
                     hl.range(entry.LPGT.ploidy).find(lambda h: entry.LPGT[h] == li),
                 ),
             ),
-            entry._alleles[entry.LA[li]],
+            hl.min_rep(
+                entry._locus,
+                hl.array([entry._alleles[0], entry._alleles[entry.LA[li]]]),
+            ),
         )
     )
 
@@ -322,12 +331,17 @@ def _classify_mnv_pairs(ht: hl.Table) -> hl.Table:
     """
 
     def _build_pair_record(entry, prev_tuple, ca, pa):
-        """Build an MNV pair struct for one (current alt, previous alt) pair."""
+        """Build an MNV pair struct for one (current alt, previous alt) pair.
+
+        Loci and alleles come from the (min-repped) carried-alt records, not the
+        scan's site locus, so the output keys join cleanly to the release HT.
+        """
         prev_e = prev_tuple[1]
         return hl.bind(
             lambda gt_class: hl.struct(
-                prev_locus=prev_tuple[0],
+                prev_locus=pa.locus,
                 prev_alleles=pa.alleles,
+                cur_locus=ca.locus,
                 cur_alleles=ca.alleles,
                 is_hethet=gt_class.is_hethet,
                 is_homhom=gt_class.is_homhom,
@@ -383,7 +397,7 @@ def _aggregate_mnv_pairs(ht: hl.Table) -> hl.Table:
     :return: Aggregated Table keyed by (locus, alleles, prev_locus, prev_alleles).
     """
     per_pair = ht.group_by(
-        locus=ht.locus,
+        locus=ht._mnv.cur_locus,
         alleles=ht._mnv.cur_alleles,
         prev_locus=ht._mnv.prev_locus,
         prev_alleles=ht._mnv.prev_alleles,
@@ -457,9 +471,12 @@ def _per_alt_af(mt: hl.MatrixTable, freq_ht: hl.Table) -> hl.Table:
     r = mt.rows().select()
     r = r.annotate(_ai=hl.range(1, hl.len(r.alleles)))
     r = r.explode("_ai")
-    r = r.annotate(
-        _af=freq_ht[r.locus, hl.array([r.alleles[0], r.alleles[r._ai]])].freq[0].AF
-    )
+    # Min-rep the biallelic [ref, alt] so the (locus, alleles) join key matches
+    # the split/min-repped release HT (a non-min-repped alt carrying
+    # multiallelic-site context would miss the join -> AF missing -> hotfix
+    # silently skipped).
+    r = r.annotate(_mr=hl.min_rep(r.locus, hl.array([r.alleles[0], r.alleles[r._ai]])))
+    r = r.annotate(_af=freq_ht[r._mr.locus, r._mr.alleles].freq[0].AF)
     return r.group_by(r.locus, r.alleles).aggregate(
         _alt_af=hl.sorted(hl.agg.collect((r._ai, r._af)), key=lambda t: t[0]).map(
             lambda t: t[1]
@@ -642,7 +659,7 @@ def discover_mnv(
             lambda e: e.annotate(
                 _alts=hl.or_missing(
                     _is_nonref(e),
-                    _get_carried_alts(e.annotate(_alleles=ht.alleles)),
+                    _get_carried_alts(e.annotate(_alleles=ht.alleles, _locus=ht.locus)),
                 )
             ).select("LGT", "PID", "adj", "_alts")
         )
