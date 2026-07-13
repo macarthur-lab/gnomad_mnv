@@ -72,15 +72,8 @@ HOM_ALT_FIX_AB_CUTOFF = 0.9
 """Allele balance above which a common-variant het-ref call is treated as hom-alt."""
 
 CLASSIFY_N_PARTITIONS = 500
-"""Suggested number of partitions to repartition to before classification.
-
-Repartitioning is off by default; pass ``--classify-n-partitions`` to enable it
-(this is a reasonable starting value). Each row carries an entry per sample in
-the cohort, so the classification step (which builds nested per-entry MNV-pair
-arrays) is memory-heavy per row. Spreading the (already scan-filtered, typically
-small) row count across more partitions keeps any single task from exceeding
-Hail's off-heap memory limit.
-"""
+"""Default for ``--classify-n-partitions`` (off unless passed): a reasonable
+starting value if a classification-step off-heap OOM needs relieving."""
 
 DEFAULT_TEST_GENES = [
     # PCNT on GRCh38.
@@ -104,33 +97,20 @@ def _is_nonref(e: hl.expr.StructExpression) -> hl.expr.BooleanExpression:
 
 
 def _get_carried_alts(entry: hl.expr.StructExpression) -> hl.expr.ArrayExpression:
-    """Build one haplotype-resolved record per distinct carried alt allele.
+    """One record per distinct carried alt of a non-ref genotype.
 
-    Generalizes a single biallelic representation to an array so het_non_ref
-    (``1/2``) carriers — which hold two different alt alleles on opposite
-    haplotypes — contribute both alts. het-ref (``0/1``) and hom-var (``1/1``)
-    each yield a single record, identical to the previous single-struct logic;
-    ``1/2`` yields two.
+    An array (not one struct) so het_non_ref (``1/2``) contributes both alts;
+    het-ref/hom-var yield one. Alleles are min-repped so output keys join the
+    split/min-repped release HT — a raw multiallelic alt (e.g.
+    ``["TCCGGG","GCCGGG"]``) would miss the join. Built at localization, not per
+    pair, so the row ``alleles`` array isn't carried through the scan window on
+    every sample's entry.
 
-    Each record maps the local alt index to the global allele index via LA and
-    carries the haplotype the alt sits on (for cis het-het classification).
-
-    .. note::
-
-        Called once per non-ref entry at localization time (see
-        :func:`discover_mnv`), not per candidate pair, so the full (possibly
-        multiallelic) row ``alleles`` array never needs to be carried on every
-        sample's entry through the scan window.
-
-    :param entry: Entry expression with ``LGT``, ``LPGT``, ``LA``, ``_alleles``,
-        and ``_locus`` fields. ``LGT`` may be haploid (post sex-ploidy adjustment
-        on sex chromosomes), so allele extraction is ploidy-safe.
-    :return: Array of structs, one per carried alt, each with ``locus``
-        (min-repped), ``alleles`` (min-repped array<str>), ``is_snp`` (bool),
-        ``is_hom`` (bool), and ``hap`` (int32 or missing).
+    :param entry: Entry with ``LGT``, ``LPGT``, ``LA``, ``_alleles``, ``_locus``.
+        ``LGT`` may be haploid post sex-ploidy, so extraction is ploidy-safe.
+    :return: Array of ``{locus, alleles, is_snp, is_hom, hap}`` (locus/alleles
+        min-repped; ``hap`` is the int32 haplotype index or missing).
     """
-    # Distinct carried alt local indices, ploidy-safe (LGT may be haploid on
-    # non-PAR X/Y after sex-ploidy adjustment).
     carried = hl.array(
         hl.set(hl.range(entry.LGT.ploidy).map(lambda i: entry.LGT[i])).filter(
             lambda a: a > 0
@@ -138,20 +118,13 @@ def _get_carried_alts(entry: hl.expr.StructExpression) -> hl.expr.ArrayExpressio
     )
     return carried.map(
         lambda li: hl.bind(
-            # Min-rep the biallelic [ref, alt] so the emitted (locus, alleles)
-            # matches the split/min-repped release HT — otherwise the alt carries
-            # multiallelic-site context (e.g. ["TCCGGG", "GCCGGG"]) and the
-            # release/VEP/hotfix-AF joins keyed on (locus, alleles) miss. min-rep
-            # returns both the (possibly shifted) locus and the trimmed alleles.
             lambda mr: hl.struct(
                 locus=mr.locus,
                 alleles=mr.alleles,
                 is_snp=hl.is_snp(mr.alleles[0], mr.alleles[1]),
                 is_hom=entry.LGT.is_hom_var(),
-                # Haplotype index carrying this alt: the position h where
-                # LPGT[h] == li. ``find`` over the ploidy range is ploidy-safe
-                # and yields missing when LPGT doesn't carry li (e.g. a GT/PGT
-                # allele mismatch), never a wrong index.
+                # ``find`` (not a fixed index) so it's ploidy-safe and yields
+                # missing — never a wrong index — if LPGT doesn't carry li.
                 hap=hl.or_missing(
                     entry.LPGT.phased,
                     hl.range(entry.LPGT.ploidy).find(lambda h: entry.LPGT[h] == li),
@@ -170,23 +143,13 @@ def _classify_alt_pair(
     pa: hl.expr.StructExpression,
     same_phase_set: hl.expr.BooleanExpression,
 ) -> hl.expr.StructExpression:
-    """Classify a pair of carried alts as het-het, hom-hom, or het-hom.
+    """Classify a carried-alt pair as het-het, hom-hom, or het-hom (all cis).
 
-    Operates on the per-alt records built by :func:`_get_carried_alts` (each
-    with ``is_hom`` and ``hap``), which is valid in local allele space:
-    het/hom status is the same in local and global representations, and the
-    haplotype index is always relative to local ref/alt.
-
-    Classification rules:
-
-    - **het-het**: Both alts are het (not hom), both have a defined haplotype
-      (phased), share the same phase set (``same_phase_set``), and sit on the
-      same haplotype (``ca.hap == pa.hap``), confirming they are in cis. This
-      also covers het_non_ref (``1/2``), where each alt is its own het record on
-      its own haplotype.
-    - **hom-hom**: Both alts are homozygous.
-    - **het-hom**: Exactly one alt is homozygous. A hom occupies both
-      haplotypes, so the pair is always in cis.
+    Valid in local allele space: het/hom status and the haplotype index are the
+    same as post-split. het-het needs both phased into the same phase set and
+    haplotype to confirm cis; het-hom is unconditionally cis because a hom
+    occupies both haplotypes. A non-cis het pair matches none and is dropped
+    downstream.
 
     :param ca: Current carried-alt record (with ``is_hom``, ``hap``).
     :param pa: Previous carried-alt record (with ``is_hom``, ``hap``).
@@ -213,28 +176,17 @@ def _classify_alt_pair(
 
 
 def _scan_for_candidates(ht: hl.Table, max_distance: int) -> hl.Table:
-    """Scan a localized Table for MNV candidates using a sliding window.
+    """Annotate each non-ref entry with its window of nearby prior non-ref
+    entries (``prev``), then keep rows where some sample has a candidate pair.
 
-    For each sample, tracks a window of recent non-ref entries using
-    ``hl.scan.fold`` with ``hl.case()`` branching. The window stores
-    ``(locus, entry)`` tuples and uses missing state to represent "no recent
-    non-ref entries seen". After the scan, each entry is annotated with a
-    ``prev`` field containing the filtered window of nearby previous non-ref
-    variants. The table is filtered to rows where at least one sample has a
-    candidate MNV pair.
-
-    :param ht: Localized Table (from ``mt._localize_entries``). Entries must
-        contain ``LGT`` (and the precomputed ``_alts`` array plus ``PID``/``adj``,
-        carried opaquely through the window for use in classification).
+    :param ht: Localized Table; entries carry ``LGT`` plus the precomputed
+        ``_alts``/``PID``/``adj`` used downstream (opaque to the scan).
     :param max_distance: Maximum bp distance between two SNVs.
-    :return: Filtered localized Table with ``prev`` annotated on each entry,
-        checkpointed to a temporary path (spilled to GCS rather than held in
-        memory, since the widened one-entry-per-sample table can be large).
+    :return: Filtered Table with ``prev`` on each entry, checkpointed to GCS
+        (the widened one-entry-per-sample table is too large to hold in memory).
     """
-    # Typed missing value representing "no window state". The window is an
-    # array of (locus, entry) tuples. Using missing (rather than empty array)
-    # lets the fold distinguish "never seen a non-ref entry" from "saw one
-    # but it fell out of range".
+    # missing (not empty array) so the fold can tell "no non-ref seen yet" from
+    # "one seen but now out of range". Window = array of (locus, entry) tuples.
     missing_prev = hl.missing(
         hl.tarray(hl.ttuple(ht.locus.dtype, ht.__entries.dtype.element_type))
     )
@@ -268,17 +220,13 @@ def _scan_for_candidates(ht: hl.Table, max_distance: int) -> hl.Table:
                     )
                 )
             ),
-            # combop: merge windows from different partitions. hl.flatten
-            # concatenates two defined arrays; hl.coalesce handles the case
-            # where one or both sides are missing (no state in that partition).
+            # combop: merge per-partition windows (coalesce handles a missing side).
             lambda a, b: hl.coalesce(hl.flatten([a, b]), a, b),
         ),
         ht.__entries,
     )
 
-    # Zip entries with scan results, annotate each entry with its prev window.
-    # On the very first row, scan_result is missing (no previous rows), so
-    # coalesce provides a per-sample array of missing windows as the fallback.
+    # First row has no scan_result (missing) -> fall back to per-sample missing.
     missing_entry = hl.range(ht.__cols.length()).map(lambda _: missing_prev)
     ht = ht.select(
         __entries=hl.zip(ht.__entries, hl.coalesce(scan_result, missing_entry)).map(
@@ -298,44 +246,29 @@ def _scan_for_candidates(ht: hl.Table, max_distance: int) -> hl.Table:
         ),
     )
 
-    # Checkpoint (rather than .cache()) the widened, scan-filtered table: it
-    # carries one entry per cohort sample, so holding it in executor memory
-    # risks OOM at chromosome/full-cohort scale. Spilling to GCS trades a
-    # write/read round-trip for bounded memory.
+    # Checkpoint (not cache): the widened one-per-sample table would risk an
+    # executor OOM if held in memory.
     ht = ht.filter(hl.any(ht.__entries.map(lambda x: hl.is_defined(x.prev))))
     return ht.checkpoint(hl.utils.new_temp_file("mnv_scan_candidates", "ht"))
 
 
 def _classify_mnv_pairs(ht: hl.Table) -> hl.Table:
-    """Classify MNV pairs from scan results and explode into one row per pair.
+    """Explode to one row per (candidate carrier, classified alt pair).
 
-    For each entry with a defined ``prev`` window, classifies every
-    ``cur._alts × prev._alts`` alt pair using :func:`_classify_alt_pair` and
-    reads the biallelic alleles from each carried-alt record (built once per
-    non-ref entry at localization time in :func:`discover_mnv`). het_non_ref
-    (``1/2``) entries carry two alts, so a single entry can contribute multiple
-    distinct pairs. A pair is adj-passing when both constituent entry genotypes
-    pass adj. Filters to pairs where both carried alleles are SNPs and at least
-    one classification matches.
+    Carriers are exploded to one row each *before* their ``cur._alts ×
+    prev._alts`` pairs are built, bounding per-task memory to one carrier's
+    pairs rather than a per-row array across all samples (the off-heap hotspot)
+    — so no classification-step repartition is needed at scale. Keeps SNP-SNP
+    pairs matching a classification; a pair is adj iff both genotypes are.
 
-    Candidate carriers are exploded to one row per (site, carrier) **before**
-    the pair arrays are built, so per-task memory is bounded by a single
-    carrier's pairs rather than a per-row array across all samples (the
-    off-heap hotspot). The classification step therefore needs no repartition
-    even at full-cohort scale.
-
-    :param ht: Localized Table with ``prev`` annotated on entries (output of
-        :func:`_scan_for_candidates`). Entries must carry ``_alts`` (array of
-        carried-alt records), ``PID``, and ``adj``.
-    :return: Table with one ``_mnv`` struct per row (after checkpoint + explode).
+    :param ht: Output of :func:`_scan_for_candidates`; entries carry ``_alts``,
+        ``PID``, ``adj``, and ``prev``.
+    :return: Table with one ``_mnv`` struct per row.
     """
 
     def _build_pair_record(entry, prev_tuple, ca, pa):
-        """Build an MNV pair struct for one (current alt, previous alt) pair.
-
-        Loci and alleles come from the (min-repped) carried-alt records, not the
-        scan's site locus, so the output keys join cleanly to the release HT.
-        """
+        # Loci/alleles come from the (min-repped) carried-alt records, not the
+        # scan's site locus, so output keys join the release HT.
         prev_e = prev_tuple[1]
         return hl.bind(
             lambda gt_class: hl.struct(
@@ -371,9 +304,6 @@ def _classify_mnv_pairs(ht: hl.Table) -> hl.Table:
             )
         )
 
-    # Keep only candidate entries (those with a prev window), then explode to
-    # one row per (site, carrier) before building pair arrays so per-task
-    # memory stays bounded to a single carrier's pairs.
     ht = ht.select(_cands=ht.__entries.filter(lambda e: hl.is_defined(e.prev)))
     ht = ht.filter(hl.len(ht._cands) > 0)
     ht = ht.checkpoint(hl.utils.new_temp_file("mnv_scan_results", "ht"))
@@ -385,16 +315,11 @@ def _classify_mnv_pairs(ht: hl.Table) -> hl.Table:
 
 
 def _aggregate_mnv_pairs(ht: hl.Table) -> hl.Table:
-    """Aggregate MNV pairs per variant pair across all samples.
+    """Count occurrences per variant pair: raw (all carriers) and ``_adj`` (both
+    genotypes pass adj), split into het-het / hom-hom / het-hom.
 
-    Groups by biallelic (locus, alleles) for both the current and previous SNV,
-    then counts het-het, hom-hom, het-hom, and total occurrences. Each count has
-    a raw variant (all carriers) and an ``_adj`` variant restricted to pairs
-    where both constituent genotypes pass adj.
-
-    :param ht: Table with one ``_mnv`` struct per row (output of
-        :func:`_classify_mnv_pairs`).
-    :return: Aggregated Table keyed by (locus, alleles, prev_locus, prev_alleles).
+    :param ht: Output of :func:`_classify_mnv_pairs` (one ``_mnv`` per row).
+    :return: Table keyed by (locus, alleles, prev_locus, prev_alleles).
     """
     per_pair = ht.group_by(
         locus=ht._mnv.cur_locus,
@@ -447,34 +372,22 @@ def _normalize_chrom(value: str) -> str:
 
 
 def _per_alt_af(mt: hl.MatrixTable, freq_ht: hl.Table) -> hl.Table:
-    """Build a per-alt released-AF row array for the hom-alt hotfix.
+    """Per-alt release-AF row array for the hom-alt hotfix: ``_alt_af[g-1]`` is
+    the release AF of global alt ``g``.
 
-    Returns a Table keyed by ``(locus, alleles)`` with an ``_alt_af`` array
-    holding the release AF of each biallelic ``[ref, alt_i]`` (ordered by alt
-    index, so ``_alt_af[g - 1]`` is the AF of global alt allele ``g``).
-
-    .. note::
-
-        Built by explode → join → group rather than a join inside an
-        ``hl.range(...).map(...)`` lambda. A table join whose key depends on the
-        map loop variable produces IR that Hail's renderer cannot lower
-        (``KeyError`` in ``CSEAnalysisPass`` once the row feeds entry
-        expressions carried through the scan). SNP alts are min-repped and hit
-        the split release HT; a non-min-repped indel alt may miss (AF → missing
-        → hotfix skipped), which is safe and irrelevant to SNP-only MNV output.
+    Uses explode → join → group, not a join inside a ``.map`` lambda: a join
+    keyed on the loop variable produces IR Hail can't lower (``KeyError`` in
+    ``CSEAnalysisPass`` once it feeds entries carried through the scan).
 
     :param mt: MatrixTable keyed by ``(locus, alleles)``.
-    :param freq_ht: Split release HT keyed by ``(locus, alleles)`` with a
-        ``freq`` array (``freq[0].AF`` is the adj AF).
+    :param freq_ht: Split release HT keyed by ``(locus, alleles)``; ``freq[0].AF``
+        is the adj AF.
     :return: Table keyed by ``(locus, alleles)`` with an ``_alt_af`` array.
     """
     r = mt.rows().select()
     r = r.annotate(_ai=hl.range(1, hl.len(r.alleles)))
     r = r.explode("_ai")
-    # Min-rep the biallelic [ref, alt] so the (locus, alleles) join key matches
-    # the split/min-repped release HT (a non-min-repped alt carrying
-    # multiallelic-site context would miss the join -> AF missing -> hotfix
-    # silently skipped).
+    # min-rep so the key matches the min-repped release HT (else AF missing).
     r = r.annotate(_mr=hl.min_rep(r.locus, hl.array([r.alleles[0], r.alleles[r._ai]])))
     r = r.annotate(_af=freq_ht[r._mr.locus, r._mr.alleles].freq[0].AF)
     return r.group_by(r.locus, r.alleles).aggregate(
@@ -485,16 +398,11 @@ def _per_alt_af(mt: hl.MatrixTable, freq_ht: hl.Table) -> hl.Table:
 
 
 def _drop_all_lowqual_sites(mt: hl.MatrixTable) -> hl.MatrixTable:
-    """Drop unsplit sites where every alt allele is AS_lowqual.
+    """Drop sites where every alt is AS_lowqual — release-excluded, can't be a
+    real MNV, and dropping them shrinks the table fed to the scan.
 
-    Such sites are excluded from the gnomAD release and cannot form a real MNV,
-    so removing them before the scan shrinks the widened one-entry-per-sample
-    table. This is a row-only filter — no genotypes are touched.
-
-    The unsplit info HT (``AS_lowqual`` is an ``array<bool>`` over alts) is
-    re-read with the variant_data's own partition intervals so the row join is
-    co-partitioned and needs no shuffle (the idiom the v4 VDS loader itself
-    uses; see ``gnomad_qc.v4.resources.basics``).
+    The unsplit info HT (``AS_lowqual`` is ``array<bool>`` over alts) is re-read
+    with the variant_data's partition intervals so the join needs no shuffle.
 
     :param mt: variant_data MatrixTable keyed by ``(locus, alleles)``.
     :return: ``mt`` with all-AS_lowqual sites removed.
@@ -521,102 +429,57 @@ def discover_mnv(
 ) -> hl.Table:
     """Run single-pass MNV discovery on an unsplit VDS.
 
-    Works in local allele space (LGT/LPGT/LA/PID), extracting biallelic alleles
-    via LA indexing, so no separate unlocalize + split step is needed. Scans
-    across rows using ``hl.scan.fold`` with ``hl.case()`` branching to track a
-    window of recent non-ref entries per sample.
-
-    Pipeline:
-
-    0. **Drop junk sites + adjust genotypes** (in-line, before localizing):
-       drop sites where every alt is AS_lowqual (:func:`_drop_all_lowqual_sites`),
-       then adjust genotypes in gnomAD QC's canonical order: flag het_non_ref →
-       hom-alt depletion hotfix (high-AB het-ref at common variants → hom-alt,
-       skipping het_non_ref and fixed-hom-alt-model samples) → sex-ploidy
-       adjustment → adj annotation.
-    1. **Scan** (:func:`_scan_for_candidates`): Localize (no densify — the scan
-       treats missing and 0/0 entries alike), build each non-ref entry's
-       per-carried-alt records (``_alts``), scan
-       using ``hl.scan.fold`` tracking a sliding window of non-ref entries per
-       sample. Filter to rows with candidate MNV pairs.
-    2. **Classify** (:func:`_classify_mnv_pairs`): For each candidate, classify
-       every ``cur._alts × prev._alts`` alt pair (het-het / hom-hom / het-hom)
-       and read the precomputed biallelic alleles for the aggregation key.
-    3. **Aggregate** (:func:`_aggregate_mnv_pairs`): Group by variant pair
-       across all samples, emitting raw and ``_adj`` counts.
+    Stays in local allele space (LGT/LPGT/LA/PID) — no split. Pipeline: drop
+    all-lowqual sites → adjust genotypes (het_non_ref flag → hom-alt hotfix →
+    sex ploidy → adj, gnomAD QC's order) → localize → build ``_alts`` →
+    :func:`_scan_for_candidates` → :func:`_classify_mnv_pairs` →
+    :func:`_aggregate_mnv_pairs`.
 
     .. note::
 
-        Sex-ploidy adjustment is a no-op on autosomes; on ``--chr X/Y`` it makes
-        adj ploidy-correct, but hemizygous cis-MNV classification is not
-        specially modeled (the source paper restricted to autosomes).
-
-    .. note::
-
-        Uses ``_localize_entries`` + ``hl.scan.array_agg`` + ``hl.scan.fold``
-        instead of MT entry scans. Direct scans in MT entry context cause
-        ``KeyError: 'agg_capability'`` in Hail's ``CSEAnalysisPass``. The
-        localized pattern (from gnomAD's ``compute_last_ref_block_end``) works.
+        Scans a localized Table via ``hl.scan.array_agg``/``fold``, not an MT
+        entry scan — the latter hits ``KeyError: 'agg_capability'`` in Hail's
+        ``CSEAnalysisPass``. Sex ploidy is a no-op on autosomes; hemizygous X/Y
+        cis-MNV classification is not modeled (the source paper used autosomes).
 
     :param vds: Unsplit gnomAD v4 VariantDataset.
-    :param max_distance: Maximum bp distance between SNVs to consider as an MNV.
-        Default is 2 (codon reading frame).
-    :param entries_to_keep: Entry fields needed for MNV discovery.
-    :param classify_n_partitions: If set, repartition (with a shuffle) to this
-        many partitions before the classification step. Default is None (no
-        repartition).
-
-        .. warning::
-
-            This triggers a shuffle of the fully-widened, one-entry-per-sample
-            table. Safe for small (e.g. ``--intervals``) row counts, but likely
-            too expensive/memory-heavy for a full-cohort, genome/exome-wide run —
-            leave unset there.
+    :param max_distance: Max bp between the two SNVs. Default 2 (codon frame).
+    :param entries_to_keep: Entry fields to keep (global/post-split names).
+    :param classify_n_partitions: If set, repartition before classification;
+        only safe at ``--intervals`` scale (shuffles the widened table), so
+        leave unset for full-cohort runs.
     :return: Hail Table of MNV pairs with per-pair counts.
     """
     mt = vds.variant_data
-
-    # Drop sites where every alt is AS_lowqual (release-excluded, can't form a
-    # real MNV) to shrink the widened table fed to the scan.
     mt = _drop_all_lowqual_sites(mt)
-
-    # Filter to rows with at least one SNP alt allele.
     mt = mt.filter_rows(hl.any(lambda a: hl.is_snp(mt.alleles[0], a), mt.alleles[1:]))
 
-    # Select entries needed for classification (pre-split names) + LA.
+    # entries_to_keep uses global names; L-prefix the ones the split remaps.
     pre_split_entries = entries_to_keep + ["LA"]
     pre_split_entries = [
         "L" + e if e in {"GT", "AD", "PL", "PGT"} else e for e in pre_split_entries
     ]
     mt = mt.select_entries(*pre_split_entries)
 
-    # Per-alt released AF (indexed by alt, i.e. global allele index - 1) for the
-    # hom-alt depletion hotfix, via :func:`_per_alt_af`.
+    # Row/col inputs the hotfix + sex-ploidy need (per-alt release AF, sex
+    # karyotype, and the model flag that exempts samples from the hotfix).
     freq_ht = public_release("exomes").ht()
     af_ht = _per_alt_af(mt, freq_ht)
     mt = mt.select_rows(_alt_af=af_ht[mt.locus, mt.alleles]._alt_af)
-
-    # Sample sex karyotype (sex-ploidy adjustment) and the hom-alt model flag
-    # (samples with the fixed model don't need the depletion hotfix).
     meta_ht = meta().ht()
     mt = mt.select_cols(
         sex_karyotype=meta_ht[mt.s].sex_imputation.sex_karyotype,
         fixed_homalt_model=meta_ht[mt.s].project_meta.fixed_homalt_model,
     )
 
-    # --- Genotype adjustments, in gnomAD QC's canonical order (see
-    # gnomad_qc/v3/create_release/create_hgdp_tgp_subset.py): mark het_non_ref ->
-    # hom-alt depletion hotfix -> adjust sex ploidy -> annotate adj. ---
-
-    # (1) Flag het_non_ref (1/2) before any GT edit; the hotfix must skip these.
+    # Genotype adjustments in gnomAD QC's canonical order (see
+    # gnomad_qc/v3/create_release/create_hgdp_tgp_subset.py):
+    # het_non_ref flag -> hom-alt hotfix -> sex ploidy -> adj.
     mt = mt.annotate_entries(_het_non_ref=mt.LGT.is_het_non_ref())
 
-    # (2) Hom-alt depletion hotfix: reclassify a high-AB het-ref call at a common
-    # variant to hom-alt. Local-space analog of
-    # gnomad_qc.v3.utils.hom_alt_depletion_fix, whose biallelic hl.call(1, 1)
-    # would be wrong here — but only het-ref calls are ever affected (het_non_ref
-    # and homs are skipped), so hl.call of the single carried local alt (LGT[1])
-    # is correct.
+    # hom-alt hotfix (local-space analog of hom_alt_depletion_fix): only het-ref
+    # is affected, so hl.call(LGT[1], LGT[1]) is right where the stock
+    # biallelic hl.call(1, 1) would not be at multiallelic sites.
     high_ab_het_ref = (
         mt.LGT.is_het_ref()
         & ~mt._het_non_ref
@@ -626,34 +489,19 @@ def discover_mnv(
     )
     mt = mt.annotate_entries(
         LGT=hl.if_else(
-            high_ab_het_ref,
-            hl.call(mt.LGT[1], mt.LGT[1]),
-            mt.LGT,
-            missing_false=True,
+            high_ab_het_ref, hl.call(mt.LGT[1], mt.LGT[1]), mt.LGT, missing_false=True
         )
     )
-
-    # (3) Adjust sex ploidy on the hotfixed GT (no-op on autosomes; haploidizes
-    # non-PAR X/Y in XY samples, sets XX-on-Y to missing).
     mt = mt.annotate_entries(
         LGT=adjusted_sex_ploidy_expr(mt.locus, mt.LGT, mt.sex_karyotype)
     )
-
-    # (4) Annotate adj on the fully adjusted GT (ploidy-aware DP thresholds).
     mt = mt.annotate_entries(adj=get_adj_expr(mt.LGT, mt.GQ, mt.DP, mt.LAD))
 
-    # Localize to a Table for scan-based processing. No unfilter_entries /
-    # densify step is needed: the scan treats a missing entry identically to
-    # 0/0 (both "not non-ref"), so leaving hom-ref entries sparse yields the
-    # same MNV results while avoiding materializing a 0/0 for every sample at
-    # every site (verified equivalent on synthetic data).
+    # No densify: the scan treats a missing entry like 0/0 (both "not non-ref"),
+    # so hom-ref entries stay sparse instead of materializing a 0/0 per sample
+    # per site (verified equivalent).
     logger.info("Localizing and scanning for MNV candidates (single-pass)...")
     ht = mt._localize_entries("__entries", "__cols")
-    # Build per-carried-alt records once per non-ref entry (guarded to non-ref,
-    # missing otherwise), reading the row alleles here so the multiallelic
-    # alleles array isn't duplicated onto every sample's entry and carried
-    # through the scan window. Keep only LGT (scan non-ref test), PID + adj
-    # (classification), and _alts; drop the rest.
     ht = ht.annotate(
         __entries=ht.__entries.map(
             lambda e: e.annotate(
@@ -682,53 +530,31 @@ def discover_mnv(
 
 
 def annotate_mnv(mnv_ht: hl.Table) -> hl.Table:
-    """Annotate MNV pairs with frequency and VEP data for both SNVs.
+    """Add AC/AF/filters (exomes release) and VEP to both SNVs of each pair.
 
-    Joins AC/AF/filters from the gnomAD v4 exomes release
-    (``gnomad.resources.grch38.gnomad.public_release("exomes")``) and VEP consequences
-    from the v4 exomes VEP HT (``gnomad_qc.v4.resources.annotations.get_vep``) onto
-    each variant pair.
-
-    .. note::
-
-        Uses the exomes release (not joint) because the joint release table only
-        contains ``joint_freq``/``joint_faf`` fields — it lacks ``filters`` and
-        per-data-type frequency arrays.
+    Exomes release, not joint: the joint table lacks ``filters`` and
+    per-data-type frequency arrays (only ``joint_freq``/``joint_faf``).
 
     :param mnv_ht: MNV Hail Table output from :func:`discover_mnv`.
-    :return: MNV Table annotated with AC, AF, filters, and VEP for both SNVs.
+    :return: MNV Table with AC, AF, filters, and VEP for both SNVs.
     """
-    # --- Frequency and filter annotations from exomes release. ---
     freq_ht = public_release("exomes").ht()
-
-    # Annotate SNV2 (current variant).
     snv2_data = freq_ht[mnv_ht.locus, mnv_ht.alleles]
+    snv1_data = freq_ht[mnv_ht.prev_locus, mnv_ht.prev_alleles]
     mnv_ht = mnv_ht.annotate(
         filters=snv2_data.filters,
         AC=snv2_data.freq[0].AC,
         AF=snv2_data.freq[0].AF,
-    )
-
-    # Annotate SNV1 (previous variant).
-    snv1_data = freq_ht[mnv_ht.prev_locus, mnv_ht.prev_alleles]
-    mnv_ht = mnv_ht.annotate(
         prev_filters=snv1_data.filters,
         prev_AC=snv1_data.freq[0].AC,
         prev_AF=snv1_data.freq[0].AF,
     )
 
-    # --- VEP annotations from v4 exomes. ---
     vep_ht = get_vep(data_type="exomes").ht()
-
-    # Annotate SNV2 (current variant).
-    mnv_ht = mnv_ht.annotate(vep=vep_ht[mnv_ht.locus, mnv_ht.alleles].vep)
-
-    # Annotate SNV1 (previous variant).
-    mnv_ht = mnv_ht.annotate(
-        prev_vep=vep_ht[mnv_ht.prev_locus, mnv_ht.prev_alleles].vep
+    return mnv_ht.annotate(
+        vep=vep_ht[mnv_ht.locus, mnv_ht.alleles].vep,
+        prev_vep=vep_ht[mnv_ht.prev_locus, mnv_ht.prev_alleles].vep,
     )
-
-    return mnv_ht
 
 
 def main(args: argparse.Namespace) -> None:
@@ -780,7 +606,6 @@ def main(args: argparse.Namespace) -> None:
             logger.info("Using the UKB-only VDS subset.")
         start = time.time()
 
-        # --- Load unsplit VDS, optionally filtering to test intervals. ---
         vds_loader = get_gnomad_v4_ukb_vds if args.ukb_only else get_gnomad_v4_vds
         vds = vds_loader(
             filter_intervals=intervals,
@@ -788,10 +613,8 @@ def main(args: argparse.Namespace) -> None:
             release_only=args.release_only,
         )
 
-        # Repartitioning before classification shuffles the fully-widened
-        # (one-entry-per-sample) table, so it's only safe at --intervals (gene
-        # interval) scale. A --chr run is a spatial subset of the full run and,
-        # like it, relies on native partitioning instead of a shuffle.
+        # classify_n_partitions only at --intervals scale: it shuffles the
+        # widened table, too costly for --chr / full-cohort runs.
         mnv_ht = discover_mnv(
             vds,
             max_distance=args.max_distance,
