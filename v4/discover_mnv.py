@@ -569,8 +569,8 @@ def discover_mnv(
         .. warning::
 
             This triggers a shuffle of the fully-widened, one-entry-per-sample
-            table. Safe for small (e.g. ``--test``) row counts, but likely too
-            expensive/memory-heavy for a full-cohort, genome/exome-wide run —
+            table. Safe for small (e.g. ``--intervals``) row counts, but likely
+            too expensive/memory-heavy for a full-cohort, genome/exome-wide run —
             leave unset there.
     :return: Hail Table of MNV pairs with per-pair counts.
     """
@@ -665,7 +665,7 @@ def discover_mnv(
         )
     )
 
-    # Scan → repartition (test mode only) → classify → aggregate.
+    # Scan → repartition (--intervals only) → classify → aggregate.
     ht = _scan_for_candidates(ht, max_distance)
 
     if classify_n_partitions is not None:
@@ -811,6 +811,24 @@ def main(args: argparse.Namespace) -> None:
         logger.info("Writing MNV discovery results to %s.", discovery_resource.path)
         mnv_ht.write(discovery_resource.path, overwrite=args.overwrite)
 
+        # Guard: ``hl.min_rep`` can shift a SNP's locus when it sits inside a
+        # padded multi-allelic ref, moving it outside the site-locus pairing
+        # window. Flag any emitted pair whose distance is outside
+        # [1, max_distance]. Read back the written (small, aggregated) HT so this
+        # cheap check doesn't re-run the whole pipeline.
+        written = discovery_resource.ht()
+        n_bad = written.aggregate(
+            hl.agg.count_where((written.dist < 1) | (written.dist > args.max_distance))
+        )
+        if n_bad:
+            logger.warning(
+                "%d MNV pair(s) have dist outside [1, %d] — a SNP's locus likely"
+                " shifted inside a padded multi-allelic ref during min-rep;"
+                " inspect these pairs before use.",
+                n_bad,
+                args.max_distance,
+            )
+
         elapsed = time.time() - start
         logger.info("Finished MNV discovery in %.1f seconds.", elapsed)
 
@@ -856,7 +874,7 @@ if __name__ == "__main__":
     step_args.add_argument(
         "--annotate",
         help=(
-            "Annotate the discovery HT with AC, AF, filters (joint release)"
+            "Annotate the discovery HT with AC, AF, filters (exomes release)"
             " and VEP consequences (v4 exomes), then write the annotated HT."
         ),
         action="store_true",
