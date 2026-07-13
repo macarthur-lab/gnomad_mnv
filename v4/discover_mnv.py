@@ -192,6 +192,10 @@ def _scan_for_candidates(ht: hl.Table, max_distance: int) -> hl.Table:
     )
 
     def _in_window(x):
+        # NOTE: windows on the SITE locus, while the pipeline emits min-repped
+        # loci — these can differ when a SNP is left-padded at a multiallelic
+        # site, so a valid pair can be missed / an out-of-range pair emitted.
+        # Known, un-fixed edge case; see v4/KNOWN_ISSUES.md.
         return (ht.locus.contig == x[0].contig) & (
             (ht.locus.position - x[0].position) <= max_distance
         )
@@ -647,7 +651,8 @@ def main(args: argparse.Namespace) -> None:
             logger.warning(
                 "%d MNV pair(s) have dist outside [1, %d] — a SNP's locus likely"
                 " shifted inside a padded multi-allelic ref during min-rep;"
-                " inspect these pairs before use.",
+                " inspect these pairs before use (see v4/KNOWN_ISSUES.md; note this"
+                " guard only flags emitted pairs, not silently-missed ones).",
                 n_bad,
                 args.max_distance,
             )
