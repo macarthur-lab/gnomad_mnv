@@ -22,11 +22,13 @@ a *left-padded* reference allele, this produces two edge-case defects:
    falls outside `[1, max_distance]` is still written; the guard only logs a warning and
    `--annotate` consumes the rows as-is.
 
-**Why it hasn't bitten:** across all validation runs (PCNT and AHNAK2, ukb-only and full
-cohort, `max_distance` 2 and 10) every multiallelic SNP alt differed at the **first** base
-of the ref, so `hl.min_rep` shift = 0 and site distance == min-repped distance. The issue
-only arises when a SNP is left-padded — i.e. co-located at a multiallelic site with an
-indel that anchors the site's ref start to the *left* of the SNP.
+**Why it hasn't bitten:** in the validated regions every multiallelic SNP alt differs at
+the **first** base of the ref, so `hl.min_rep` shift = 0 and site distance == min-repped
+distance. Checked directly on the full-cohort VDS by min-repping every `[ref, alt_i]` at
+multiallelic sites and counting SNP alts whose locus shifts: 0 of 37,201 (PCNT) and 0 of
+22,427 (AHNAK2). The issue only arises when a SNP is left-padded — i.e. co-located at a
+multiallelic site with an indel that anchors the site's ref start to the *left* of the
+SNP — which none of these sites are.
 
 ### Background: two coordinate systems
 
@@ -88,10 +90,11 @@ SNP alt `GTCGGG` differs from ref at position 1, so
 ### Current mitigation
 
 - `_aggregate_mnv_pairs` computes `dist` from the min-repped loci.
-- A post-write guard in `main()` reads the written discovery HT back and
-  `logger.warning`s the count of pairs with `dist` outside `[1, max_distance]`
-  (commit `46c2031`). **It only detects already-emitted (false-positive) pairs; it does
-  not filter them, and it cannot see never-formed (false-negative) pairs.**
+- A post-write guard in `main()` reads the written discovery HT back, `logger.warning`s
+  the count of pairs with `dist` outside `[1, max_distance]`, and writes those rows to a
+  sibling `*.dist_outliers.ht` (path derived from the discovery output) for triage.
+  **It only detects already-emitted (false-positive) pairs; it does not drop them from
+  the discovery output, and it cannot see never-formed (false-negative) pairs.**
 
 ### How it was found
 
