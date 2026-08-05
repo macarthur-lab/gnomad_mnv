@@ -35,7 +35,6 @@ Usage::
 import argparse
 import logging
 import time
-from typing import List, Optional, Tuple
 
 import hail as hl
 from gnomad.resources.grch38.gnomad import public_release
@@ -125,6 +124,12 @@ def _get_carried_alts(entry: hl.expr.StructExpression) -> hl.expr.ArrayExpressio
                 locus=mr.locus,
                 alleles=mr.alleles,
                 is_snp=hl.is_snp(mr.alleles[0], mr.alleles[1]),
+                # Genotype-level: every alt of a call shares it, so 1/2 gives
+                # False on both. Haploid calls are hom-var in Hail (local allele
+                # space doesn't change that — only index equality matters and
+                # LA[0] is always 0), so hemizygous alts get is_hom=True and
+                # count in n_homhom. het-hom's unconditional-cis rule leans on
+                # this flag; see KNOWN_ISSUES.md #2 for the one gap.
                 is_hom=entry.LGT.is_hom_var(),
                 # ``find`` (not a fixed index) so it's ploidy-safe and yields
                 # missing — never a wrong index — if LPGT doesn't carry li.
@@ -374,7 +379,7 @@ def _aggregate_mnv_pairs(ht: hl.Table) -> hl.Table:
     )
 
 
-def _parse_intervals(values: List[str]) -> List[Tuple[str, str]]:
+def _parse_intervals(values: list[str]) -> list[tuple[str, str]]:
     """
     Parse ``--intervals`` values into (gene_name, interval) pairs.
 
@@ -390,6 +395,12 @@ def _parse_intervals(values: List[str]) -> List[Tuple[str, str]]:
                 " e.g. 'PCSK9=chr1:55039447-55064852'."
             )
         name, interval = value.split("=", 1)
+        # An empty name would reach _interval_suffix as [""], which is truthy
+        # and yields a bare "." in the output path.
+        if not name:
+            raise ValueError(
+                f"Invalid --intervals value {value!r}; GENE_NAME must not be empty."
+            )
         parsed.append((name, interval))
     return parsed
 
@@ -405,13 +416,13 @@ def _normalize_chrom(value: str) -> str:
     return value if value.lower().startswith("chr") else f"chr{value}"
 
 
-def _per_alt_af(mt: hl.MatrixTable, freq_ht: hl.Table) -> hl.Table:
+def _per_alt_af(mt: hl.MatrixTable, release_ht: hl.Table) -> hl.Table:
     """
     Per-alt release-AF row array for the hom-alt hotfix: ``_alt_af[g-1]`` is
     the release AF of global alt ``g``.
 
     :param mt: MatrixTable keyed by ``(locus, alleles)``.
-    :param freq_ht: Split release HT keyed by ``(locus, alleles)``; ``freq[0].AF``
+    :param release_ht: Split release HT keyed by ``(locus, alleles)``; ``freq[0].AF``
         is the adj AF.
     :return: Table keyed by ``(locus, alleles)`` with an ``_alt_af`` array.
     """
@@ -420,7 +431,7 @@ def _per_alt_af(mt: hl.MatrixTable, freq_ht: hl.Table) -> hl.Table:
     r = r.explode("_ai")
     # min-rep so the key matches the min-repped release HT (else AF missing).
     r = r.annotate(_mr=hl.min_rep(r.locus, hl.array([r.alleles[0], r.alleles[r._ai]])))
-    r = r.annotate(_af=freq_ht[r._mr.locus, r._mr.alleles].freq[0].AF)
+    r = r.annotate(_af=release_ht[r._mr.locus, r._mr.alleles].freq[0].AF)
     return r.group_by(r.locus, r.alleles).aggregate(
         _alt_af=hl.sorted(hl.agg.collect((r._ai, r._af)), key=lambda t: t[0]).map(
             lambda t: t[1]
@@ -455,9 +466,10 @@ def _drop_all_lowqual_sites(mt: hl.MatrixTable) -> hl.MatrixTable:
 
 def discover_mnv(
     vds: hl.vds.VariantDataset,
+    release_ht: hl.Table,
     max_distance: int = MAX_MNV_DISTANCE,
-    entries_to_keep: List[str] = MNV_ENTRIES_TO_KEEP,
-    classify_n_partitions: Optional[int] = None,
+    entries_to_keep: list[str] = MNV_ENTRIES_TO_KEEP,
+    classify_n_partitions: int | None = None,
 ) -> hl.Table:
     """
     Run single-pass MNV discovery on an unsplit VDS.
@@ -473,12 +485,16 @@ def discover_mnv(
         entry scan — the latter hits ``KeyError: 'agg_capability'`` in Hail's
         ``CSEAnalysisPass``. Sex-ploidy adjustment is applied
         (``adjusted_sex_ploidy_expr``) and the code is ploidy-safe, so
-        ``--chr X``/``Y`` runs execute; but the het/hom/cis classification was
-        validated on autosomes only — hemizygous (haploid) calls fall into the
-        hom-hom/het-hom buckets without specific modeling (the source paper used
-        autosomes).
+        ``--chr X``/``Y`` runs execute, but their output is incomplete for XY
+        samples: non-PAR XY het calls are dropped before the scan, leaving only
+        hom-hom pairs. See DOCUMENTATION.md §3 ("Sex chromosomes") for the
+        measured rates and validation scope, and KNOWN_ISSUES.md #2 for the
+        PAR-boundary case.
 
     :param vds: Unsplit gnomAD v4 VariantDataset.
+    :param release_ht: Release sites HT supplying the per-alt AF the hom-alt
+        depletion hotfix compares against. Passed in (rather than read here) so a
+        single ``--discover --annotate`` invocation reads one release table.
     :param max_distance: Max bp between the two SNVs. Default 2 (codon frame).
     :param entries_to_keep: Entry fields to keep (global/post-split names).
     :param classify_n_partitions: If set, repartition before classification.
@@ -498,8 +514,7 @@ def discover_mnv(
 
     # Row/col inputs the hotfix + sex-ploidy need (per-alt release AF, sex
     # karyotype, and the model flag that exempts samples from the hotfix).
-    freq_ht = public_release("exomes").ht()
-    af_ht = _per_alt_af(mt, freq_ht)
+    af_ht = _per_alt_af(mt, release_ht)
     mt = mt.select_rows(_alt_af=af_ht[mt.locus, mt.alleles]._alt_af)
     meta_ht = meta().ht()
     mt = mt.select_cols(
@@ -520,7 +535,7 @@ def discover_mnv(
         & ~mt._het_non_ref
         & ~mt.fixed_homalt_model
         & (mt._alt_af[mt.LA[mt.LGT[1]] - 1] > HOM_ALT_FIX_AF_CUTOFF)
-        & (mt.LAD[mt.LGT[1]] / mt.DP > HOM_ALT_FIX_AB_CUTOFF)
+        & (hl.float64(mt.LAD[mt.LGT[1]]) / mt.DP > HOM_ALT_FIX_AB_CUTOFF)
     )
     mt = mt.annotate_entries(
         LGT=hl.if_else(
@@ -565,7 +580,7 @@ def discover_mnv(
     return _aggregate_mnv_pairs(ht)
 
 
-def annotate_mnv(mnv_ht: hl.Table) -> hl.Table:
+def annotate_mnv(mnv_ht: hl.Table, release_ht: hl.Table) -> hl.Table:
     """
     Add AC/AF/filters (exomes release) and VEP to both SNVs of each pair.
 
@@ -573,11 +588,13 @@ def annotate_mnv(mnv_ht: hl.Table) -> hl.Table:
     per-data-type frequency arrays (only ``joint_freq``/``joint_faf``).
 
     :param mnv_ht: MNV Hail Table output from :func:`discover_mnv`.
+    :param release_ht: Release sites HT supplying AC/AF/filters for both SNVs. Within
+        one invocation this is the same table :func:`discover_mnv` is given, so the
+        hotfix AF and the reported frequencies come from one release.
     :return: MNV Table with AC, AF, filters, and VEP for both SNVs.
     """
-    freq_ht = public_release("exomes").ht()
-    snv2_data = freq_ht[mnv_ht.locus, mnv_ht.alleles]
-    snv1_data = freq_ht[mnv_ht.prev_locus, mnv_ht.prev_alleles]
+    snv2_data = release_ht[mnv_ht.locus, mnv_ht.alleles]
+    snv1_data = release_ht[mnv_ht.prev_locus, mnv_ht.prev_alleles]
     mnv_ht = mnv_ht.annotate(
         filters=snv2_data.filters,
         AC=snv2_data.freq[0].AC,
@@ -605,15 +622,15 @@ def main(args: argparse.Namespace) -> None:
         tmp_dir="gs://gnomad-tmp-4day/discover_mnv",
     )
 
-    gene_names: Optional[List[str]] = None
-    intervals: Optional[List[str]] = None
-    chrom: Optional[str] = None
+    gene_names: list[str] | None = None
+    intervals: list[str] | None = None
+    chrom: str | None = None
 
     if args.chr is not None:
         chrom = _normalize_chrom(args.chr)
         intervals = [chrom]
     elif args.intervals is not None:
-        parsed: List[Tuple[str, str]] = (
+        parsed: list[tuple[str, str]] = (
             _parse_intervals(args.intervals) if args.intervals else DEFAULT_TEST_GENES
         )
         gene_names = [name for name, _ in parsed]
@@ -621,6 +638,8 @@ def main(args: argparse.Namespace) -> None:
 
     # A gene-interval subset is always a test run.
     test_enabled = args.test or args.intervals is not None
+
+    release_ht = public_release("exomes").ht()
 
     if args.discover:
         if chrom is not None:
@@ -652,6 +671,7 @@ def main(args: argparse.Namespace) -> None:
         # widened table, too costly for --chr / full-cohort runs.
         mnv_ht = discover_mnv(
             vds,
+            release_ht,
             max_distance=args.max_distance,
             entries_to_keep=MNV_ENTRIES_TO_KEEP,
             classify_n_partitions=(
@@ -705,7 +725,7 @@ def main(args: argparse.Namespace) -> None:
             chrom=chrom,
             suffix=args.output_suffix,
         ).ht()
-        mnv_ht = annotate_mnv(mnv_ht)
+        mnv_ht = annotate_mnv(mnv_ht, release_ht)
 
         annotated_resource = mnv_annotated(
             test=test_enabled,

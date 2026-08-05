@@ -194,7 +194,8 @@ After `hl.experimental.sparse_split_multi()`:
 
 See [`v4/DOCUMENTATION.md`](v4/DOCUMENTATION.md) for the discovery/annotation steps,
 scan algorithm, classification rules, output schema, and output paths. See
-[`v4/KNOWN_ISSUES.md`](v4/KNOWN_ISSUES.md) for the min-rep locus-shift edge case.
+[`v4/KNOWN_ISSUES.md`](v4/KNOWN_ISSUES.md) for the min-rep locus-shift edge case and the
+het-hom cis assumption for hemizygous pairs.
 
 ### Dataproc Submission
 

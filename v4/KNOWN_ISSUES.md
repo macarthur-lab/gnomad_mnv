@@ -145,3 +145,34 @@ SNP (a SNP co-located with an indel), not just first-base SNPs.
 - `_get_carried_alts` — the `hl.min_rep` call that introduces the forward shift.
 - `_aggregate_mnv_pairs` — `dist` computed from min-repped loci.
 - the guard block in `main()` (immediately after the discovery `.write(...)`) — warn-only.
+
+## 2. het-hom cis assumption when one side is hemizygous
+
+**Status:** known, un-fixed, no code spent on it. Effectively unreachable. Raised in PR #6
+review.
+
+`_classify_alt_pair` treats het-hom as unconditionally cis, on the reasoning that a hom
+genotype occupies both haplotypes so the pair must share one. A hemizygous call has only
+one haplotype, so that reasoning does not hold for it. Pairing a het call
+(`is_hom=False`) with a hemizygous call (`is_hom=True`) would give a het-hom pair whose
+cis status is unverified.
+
+It does not arise in general, because non-PAR XY het calls never reach the scan:
+`adjusted_sex_ploidy_expr` sets them to missing rather than haploid, and `_is_nonref`
+drops them. Within one sample that leaves a single ploidy per region — on chrX non-PAR,
+haploid for XY and diploid for XX (or for any karyotype string that is neither, which
+falls through to `.default(gt_expr)`); on chrY, haploid for XY, while XX is set to
+missing by an earlier case and contributes nothing. Either way the two `is_hom` flags
+cannot disagree.
+
+The one surviving route is a pair straddling a PAR boundary — chrX PAR1 ends 2,781,479
+and PAR2 starts 155,701,383; chrY PAR1 ends 2,781,479 and PAR2 starts 56,887,903 — where
+an XY sample keeps a diploid, possibly het, call on the PAR side and gets a haploid call
+1–2 bp away on the non-PAR side. That needs a pair spanning exactly the boundary, variant
+at both positions, in a run covering it. Not tested: no run so far has included a PAR
+boundary.
+
+Fix, if it ever matters: carry ploidy on the carried-alt record and require phasing when a
+haploid call is paired with a diploid one. Phasing must not be required for two haploid
+calls — a single haplotype makes those cis by construction, which is why the current
+hom-hom handling of hemizygous pairs is correct.

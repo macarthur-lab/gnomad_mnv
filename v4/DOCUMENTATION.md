@@ -23,7 +23,10 @@ v4/
 - **gnomad_qc** (`gnomad_qc.v4.resources.basics`): `get_gnomad_v4_vds` — loads the
   gnomAD v4 exomes VDS with standard sample filtering (hard filters, UKB exclusions).
 - **gnomad_methods** (`gnomad.resources`): `TableResource`, `public_release("exomes")` —
-  frequency and filter annotations from the gnomAD v4.1 exomes release.
+  frequency and filter annotations from the gnomAD v4.1 exomes release. Read once in
+  `main` and passed to both steps, so within one invocation the hotfix AF and the
+  reported AC/AF/filters come from the same release. Running `--discover` and
+  `--annotate` as separate invocations reads it once each.
 - **gnomad_qc** (`gnomad_qc.v4.resources.annotations`): `get_vep("exomes")` — VEP
   transcript consequences for v4 exomes.
 
@@ -118,8 +121,20 @@ Applied per `cur._alts × prev._alts` alt pair (records from `_get_carried_alts`
 | Category | Criteria |
 |----------|----------|
 | **het-het** | Both het (not hom), both `hap` defined (phased), same PID, same `hap` (cis) |
-| **hom-hom** | Both hom (incl. hotfix-converted high-AB het-refs) |
-| **het-hom** | Exactly one hom (a hom occupies both haplotypes → always cis) |
+| **hom-hom** | Both hom (incl. hotfix-converted high-AB het-refs, and hemizygous non-PAR chrX/Y calls) |
+| **het-hom** | Exactly one hom (a hom occupies both haplotypes → always cis; see KNOWN_ISSUES.md #2 for the hemizygous case, where that does not hold) |
+
+**Sex chromosomes.** `adjusted_sex_ploidy_expr` sets non-PAR XY het calls to missing
+(only non-het calls become haploid), and `_is_nonref` then drops them, so on non-PAR
+chrX/Y an XY sample contributes only hom-hom pairs. Measured over G6PD: 17.3% of non-ref
+XY calls go this way, or 5.5% of those that would pass adj. XX calls on chrY are set to
+missing outright. `--chr X`/`Y` output is therefore incomplete for XY samples, not merely
+unvalidated.
+
+Validation scope: on chrX non-PAR (G6PD) every surviving non-ref XY call is haploid and
+hom-var (1,017,790 of 1,017,790), and end-to-end output is 405 of 405 hom-hom, against
+3,072 het-het for XX over the same region. chrY is untested, and no MNV-level accuracy
+check has been run off the autosomes (the source paper used autosomes).
 
 ### Key functions
 
@@ -160,7 +175,7 @@ Reads the discovery HT and joins:
 | `prev_alleles` | `array<str>` | [ref, alt] of SNP1 |
 | `dist` | `int32` | Distance in bp (1 or 2) |
 | `n_hethet` | `int64` | Phased het-het count across samples (raw) |
-| `n_homhom` | `int64` | Hom-hom count (raw) |
+| `n_homhom` | `int64` | Hom-hom count (raw); includes hemizygous pairs |
 | `n_hethom` | `int64` | Het-hom count, either direction (raw) |
 | `n_total` | `int64` | Sum of above (raw) |
 | `n_hethet_adj` | `int64` | het-het count where both genotypes pass adj |
@@ -285,4 +300,5 @@ intervening variant at P+1 caused `_prev_nonnull` to return P+1 instead of P.
 - **Release table formatting**: Add fields and formatting required for public release
   (refer to v2 release scripts).
 - **Full-genome run**: Validate on full chromosomes, then genome-wide.
-- **Sex chromosome handling**: Special handling for male hemizygosity on X/Y.
+- **Sex chromosome handling**: Decide whether to model hemizygosity, rather than
+  inheriting the current behavior described in §3.
