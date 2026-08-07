@@ -46,10 +46,17 @@ Both can be run together: `--discover --annotate`.
 ### Usage
 
 ```bash
-# Submit to Dataproc (see CLAUDE.md for zip packaging details)
+# Small test run over one gene (--intervals implies --test).
+# See CLAUDE.md for zip packaging details.
 hailctl dataproc submit <CLUSTER> v4/discover_mnv.py \
   --pyfiles /tmp/pyfiles.zip \
-  -- --discover --annotate --test --overwrite
+  -- --discover --annotate --intervals PCNT=chr21:46324141-46445769 --overwrite
+
+# Full-cohort, genome-wide run (no interval flags). Note that --test alone does
+# NOT subset intervals; it only redirects output to the test bucket.
+hailctl dataproc submit <CLUSTER> v4/discover_mnv.py \
+  --pyfiles /tmp/pyfiles.zip \
+  -- --discover --annotate --overwrite
 ```
 
 CLI arguments:
@@ -58,7 +65,12 @@ CLI arguments:
 |----------|-------------|
 | `--discover` | Run MNV discovery |
 | `--annotate` | Run frequency + VEP annotation |
-| `--test` | Subset to PCSK9 region (chr1:55039447-55064852) |
+| `--test` | Write output to the test bucket instead of production. **Does not subset intervals** — on its own this is a full-cohort, genome-wide run |
+| `--intervals GENE=INTERVAL ...` | Subset discovery to one or more gene intervals. Implies `--test`. With no values, defaults to `PCNT=chr21:46324141-46445769`. Mutually exclusive with `--chr` |
+| `--chr N` | Run on a single whole chromosome (e.g. `--chr 21`, `--chr X`); writes to the production bucket. Mutually exclusive with `--intervals` |
+| `--ukb-only` | Use the UKB-only VDS subset; adds `.ukb_only` to the output path |
+| `--output-suffix S` | Free-form suffix appended last to the output path, so runs don't overwrite each other |
+| `--classify-n-partitions N` | Repartition before classification. Only applied with `--intervals` |
 | `--overwrite` | Overwrite existing output files |
 | `--max-distance N` | Max bp distance between SNVs (default: 2) |
 | `--high-quality-only` | Filter to high-quality samples only |
@@ -94,7 +106,8 @@ for `sparse_split_multi`.
 6. **Localize + build `_alts`**: `mt._localize_entries()` — convert to Table (required to
    avoid Hail's `KeyError: 'agg_capability'` IR bug with entry-level scans). No
    `unfilter_entries`/densify (see below). Each non-ref entry gets `_alts`: one record per
-   distinct carried alt (`alleles`, `is_snp`, `is_hom`, `hap`), ploidy-safe. Keep only
+   distinct carried **SNV** alt (`locus`, `alleles`, `is_hom`, `hap`), ploidy-safe.
+   Indel alts are dropped here, so they never enter the scan window. Keep only
    LGT, PID, adj, `_alts` per entry.
 7. **Scan** (`_scan_for_candidates`): Per-sample `hl.scan.fold` tracks a sliding window
    of recent non-ref entries. Each entry stores `(locus, entry_struct)`. The window is
@@ -126,22 +139,34 @@ Applied per `cur._alts × prev._alts` alt pair (records from `_get_carried_alts`
 
 **Sex chromosomes.** `adjusted_sex_ploidy_expr` sets non-PAR XY het calls to missing
 (only non-het calls become haploid), and `_is_nonref` then drops them, so on non-PAR
-chrX/Y an XY sample contributes only hom-hom pairs. Measured over G6PD: 17.3% of non-ref
-XY calls go this way, or 5.5% of those that would pass adj. XX calls on chrY are set to
-missing outright. `--chr X`/`Y` output is therefore incomplete for XY samples, not merely
-unvalidated.
+chrX/Y an XY sample contributes only hom-hom pairs. XX calls on chrY are set to missing
+outright, so XX contributes nothing there at all. `--chr X`/`Y` output is therefore
+incomplete for XY samples, not merely unvalidated — and on chrY it is barely usable:
 
-Validation scope: on chrX non-PAR (G6PD) every surviving non-ref XY call is haploid and
-hom-var (1,017,790 of 1,017,790), and end-to-end output is 405 of 405 hom-hom, against
-3,072 het-het for XX over the same region. chrY is untested, and no MNV-level accuracy
-check has been run off the autosomes (the source paper used autosomes).
+| | chrX non-PAR (G6PD) | chrY non-PAR (chrY:2781480-14000000) |
+|---|---|---|
+| non-ref XY calls, pre-ploidy | 1,230,965 | 222,672,048 |
+| dropped as hets | 17.3% | 94.7% |
+| dropped, counting only adj-quality calls | 5.5% | 94.5% |
+| surviving haploid calls that are hom-var | 1,017,790 / 1,017,790 | 11,719,615 / 11,719,615 |
+| end-to-end XY output | 405 / 405 hom-hom | 708,336 / 708,336 hom-hom (7,235 pairs) |
+| end-to-end XX output, same region | 3,072 het-het | 0 pairs |
+
+The chrY window includes ampliconic/palindromic MSY with known mapping problems, which
+inflates the het rate; treat 94.7% as specific to that window, not a clean chrY estimate.
+Either way, chrY discards nearly all quality calls as artifact hets and should not be
+released without a decision on hemizygous modelling.
+
+Validation scope: ploidy handling and bucket assignment are measured on both chromosomes
+as above. No MNV-level accuracy check (are the emitted pairs real, is cis correct) has
+been run off the autosomes — the source paper used autosomes.
 
 ### Key functions
 
 | Function | Location | Purpose |
 |----------|----------|---------|
 | `_is_nonref(e)` | Expression helper | Check `is_defined(LGT) & is_non_ref()` |
-| `_get_carried_alts(entry)` | Expression helper | Array of `{alleles, is_snp, is_hom, hap}`, one per carried alt (ploidy-safe) |
+| `_get_carried_alts(entry)` | Expression helper | Array of `{locus, alleles, is_hom, hap}`, one per carried **SNV** alt (ploidy-safe) |
 | `_classify_alt_pair(ca, pa, same_phase_set)` | Expression helper | Return `{is_hethet, is_homhom, is_hethom}` |
 | `_scan_for_candidates(ht, max_distance)` | Pipeline step | `hl.scan.fold` sliding window |
 | `_classify_mnv_pairs(ht)` | Pipeline step | Classify + checkpoint + explode |
@@ -159,7 +184,8 @@ Reads the discovery HT and joins:
 
 ### Function
 
-`annotate_mnv(mnv_ht)` — joins frequency and VEP, returns annotated Table.
+`annotate_mnv(mnv_ht, release_ht)` — joins frequency and VEP using the given release
+table, returns annotated Table.
 
 ---
 
@@ -173,7 +199,7 @@ Reads the discovery HT and joins:
 | `alleles` | `array<str>` | [ref, alt] of SNP2 |
 | `prev_locus` | `locus<GRCh38>` | Position of SNP1 (upstream) |
 | `prev_alleles` | `array<str>` | [ref, alt] of SNP1 |
-| `dist` | `int32` | Distance in bp (1 or 2) |
+| `dist` | `int32` | Distance in bp (1 or 2 in the common case; see KNOWN_ISSUES.md #1 for rare min-rep shift exceptions, which `main()` writes to a sibling `*.dist_outliers.ht`) |
 | `n_hethet` | `int64` | Phased het-het count across samples (raw) |
 | `n_homhom` | `int64` | Hom-hom count (raw); includes hemizygous pairs |
 | `n_hethom` | `int64` | Het-hom count, either direction (raw) |
@@ -212,6 +238,8 @@ Reads the discovery HT and joins:
 | `mnv_discovery(test=False)` | `TableResource` | Discovery output path |
 | `mnv_annotated(test=False)` | `TableResource` | Annotated output path |
 | `get_gnomad_v4_vds(...)` | `VariantDataset` | Loads unsplit VDS via `gnomad_qc` |
+| `get_gnomad_v4_ukb_vds(...)` | `VariantDataset` | Loads the UKB-only VDS subset (`--ukb-only`) |
+| `UKB_VDS` | `VariantDatasetResource` | Path to the pre-built UKB-only VDS subset |
 
 ### Output paths
 
@@ -261,6 +289,12 @@ is also a Call type. Use `.phased`, `[0]`, `[1]` — not string methods.
 ---
 
 ## 8. Test Results (PCSK9 region)
+
+> **Historical — pre-dates the current algorithm.** These counts were measured before
+> the hom-alt depletion hotfix, `adj` annotation, sex-ploidy adjustment, min-rep-keyed
+> aggregation, and het_non_ref alt-splitting were added. They compare scan
+> implementations against each other, not the pipeline's present output, and have not
+> been re-run. Retained for the scan-architecture comparison only.
 
 Region: `chr1:55039447-55064852` (PCSK9 gene, ~25 kb)
 

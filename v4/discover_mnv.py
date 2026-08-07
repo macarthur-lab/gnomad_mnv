@@ -97,6 +97,22 @@ def _is_nonref(entry: hl.expr.StructExpression) -> hl.expr.BooleanExpression:
     return hl.is_defined(entry.LGT) & entry.LGT.is_non_ref()
 
 
+def _carries_snv(entry: hl.expr.StructExpression) -> hl.expr.BooleanExpression:
+    """
+    Check if an entry carries at least one SNV alt, i.e. can form an MNV pair.
+
+    Gates entry into the scan window. Stricter than :func:`_is_nonref`: a carrier
+    of only indel alts at a mixed site passes ``_is_nonref`` but can never
+    contribute a pair, since classification keeps SNP-SNP pairs only. Excluding
+    it here keeps it out of the window, the ``prev`` structs and the checkpoint.
+
+    :param entry: Entry expression with the ``_alts`` field built by
+        :func:`_get_carried_alts` (missing for ref entries).
+    :return: Boolean expression.
+    """
+    return hl.is_defined(entry._alts) & (hl.len(entry._alts) > 0)
+
+
 def _get_carried_alts(entry: hl.expr.StructExpression) -> hl.expr.ArrayExpression:
     """
     One record per distinct carried alt of a non-ref genotype.
@@ -110,7 +126,7 @@ def _get_carried_alts(entry: hl.expr.StructExpression) -> hl.expr.ArrayExpressio
 
     :param entry: Entry with ``LGT``, ``LPGT``, ``LA``, ``_alleles``, ``_locus``.
         ``LGT`` may be haploid post sex-ploidy, so extraction is ploidy-safe.
-    :return: Array of ``{locus, alleles, is_snp, is_hom, hap}`` (locus/alleles
+    :return: Array of ``{locus, alleles, is_hom, hap}`` (locus/alleles
         min-repped; ``hap`` is the int32 haplotype index or missing).
     """
     carried = hl.array(
@@ -123,7 +139,6 @@ def _get_carried_alts(entry: hl.expr.StructExpression) -> hl.expr.ArrayExpressio
             lambda mr: hl.struct(
                 locus=mr.locus,
                 alleles=mr.alleles,
-                is_snp=hl.is_snp(mr.alleles[0], mr.alleles[1]),
                 # Genotype-level: every alt of a call shares it, so 1/2 gives
                 # False on both. Haploid calls are hom-var in Hail (local allele
                 # space doesn't change that — only index equality matters and
@@ -143,7 +158,10 @@ def _get_carried_alts(entry: hl.expr.StructExpression) -> hl.expr.ArrayExpressio
                 hl.array([entry._alleles[0], entry._alleles[entry.LA[li]]]),
             ),
         )
-    )
+        # SNP-only: classification keeps SNP-SNP pairs exclusively, so an indel
+        # alt can never reach the output. Dropping it here (rather than in the
+        # pair filter) keeps it out of the scan window and the checkpoint.
+    ).filter(lambda r: hl.is_snp(r.alleles[0], r.alleles[1]))
 
 
 def _classify_alt_pair(
@@ -192,9 +210,10 @@ def _scan_for_candidates(ht: hl.Table, max_distance: int) -> hl.Table:
     :param ht: Localized Table; entries carry ``LGT`` plus the precomputed
         ``_alts``/``PID``/``adj`` used downstream.
     :param max_distance: Maximum bp distance between two SNVs.
-    :return: Filtered Table with ``prev`` on each entry, checkpointed to GCS
-        (the widened localized table — one row per site, all-sample entries in a
-        ``__entries`` array — is too large to hold in memory).
+    :return: Table with a ``_cands`` array of candidate carrier entries (each
+        with its ``prev`` window), rows without candidates dropped, checkpointed
+        to GCS. Narrowed before the checkpoint so the widened all-sample
+        ``__entries`` array is never materialized.
     """
     # missing (not empty array) so the fold can tell "no non-ref seen yet" from
     # "one seen but now out of range". Window = array of (locus, entry) tuples.
@@ -218,15 +237,15 @@ def _scan_for_candidates(ht: hl.Table, max_distance: int) -> hl.Table:
             lambda window: (
                 hl.case()
                 # Nothing seen yet, current is ref: still nothing.
-                .when(hl.is_missing(window) & ~_is_nonref(entry), missing_window)
+                .when(hl.is_missing(window) & ~_carries_snv(entry), missing_window)
                 # Nothing seen yet, current is non-ref: start the window.
-                .when(hl.is_missing(window) & _is_nonref(entry), [(ht.locus, entry)])
+                .when(hl.is_missing(window) & _carries_snv(entry), [(ht.locus, entry)])
                 # Window has an in-range entry: prune to in-range, then append the
                 # current entry if it is non-ref.
                 .when(
                     hl.any(window.map(_in_window)),
                     hl.if_else(
-                        _is_nonref(entry),
+                        _carries_snv(entry),
                         window.filter(_in_window).append((ht.locus, entry)),
                         window.filter(_in_window),
                     ),
@@ -235,7 +254,7 @@ def _scan_for_candidates(ht: hl.Table, max_distance: int) -> hl.Table:
                 # the current entry, or drop to missing if it is ref.
                 .default(
                     hl.if_else(
-                        _is_nonref(entry),
+                        _carries_snv(entry),
                         [(ht.locus, entry)],
                         missing_window,
                     )
@@ -253,7 +272,7 @@ def _scan_for_candidates(ht: hl.Table, max_distance: int) -> hl.Table:
         __entries=hl.zip(ht.__entries, hl.coalesce(scan_result, missing_entry)).map(
             lambda pair: pair[0].annotate(
                 prev=hl.or_missing(
-                    _is_nonref(pair[0]),
+                    _carries_snv(pair[0]),
                     hl.bind(
                         # Re-filter the window by the CURRENT row's locus,
                         # since the scan result reflects the window state after
@@ -267,10 +286,13 @@ def _scan_for_candidates(ht: hl.Table, max_distance: int) -> hl.Table:
         ),
     )
 
-    # The widened localized table (one row per site, all-sample entries in a
-    # ``__entries`` array) would risk an executor OOM if held in memory, so
-    # checkpoint it.
-    ht = ht.filter(hl.any(ht.__entries.map(lambda x: hl.is_defined(x.prev))))
+    # Narrow to candidate carriers *before* materializing. The widened table has
+    # one entry slot per sample, so checkpointing it whole would write mostly
+    # non-candidates; ``_cands`` keeps only entries that have a window. The
+    # length test is the same predicate as "some entry has a defined prev", so
+    # this filter subsumes the row filter that used to precede the checkpoint.
+    ht = ht.select(_cands=ht.__entries.filter(lambda entry: hl.is_defined(entry.prev)))
+    ht = ht.filter(hl.len(ht._cands) > 0)
     return ht.checkpoint(hl.utils.new_temp_file("mnv_scan_candidates", "ht"))
 
 
@@ -286,8 +308,9 @@ def _classify_mnv_pairs(ht: hl.Table) -> hl.Table:
     scale. Keeps SNP-SNP pairs matching a classification; a pair is adj iff both
     genotypes are.
 
-    :param ht: Output of :func:`_scan_for_candidates`; entries carry ``_alts``,
-        ``PID``, ``adj``, and ``prev``.
+    :param ht: Output of :func:`_scan_for_candidates`: a ``_cands`` array of
+        candidate carrier entries, each carrying ``_alts``, ``PID``, ``adj`` and
+        ``prev``.
     :return: Table with one ``_mnv`` struct per row.
     """
 
@@ -340,10 +363,9 @@ def _classify_mnv_pairs(ht: hl.Table) -> hl.Table:
             )
         )
 
-    ht = ht.select(_cands=ht.__entries.filter(lambda entry: hl.is_defined(entry.prev)))
-    ht = ht.filter(hl.len(ht._cands) > 0)
-    ht = ht.checkpoint(hl.utils.new_temp_file("mnv_scan_results", "ht"))
-    logger.info("Scan checkpoint complete, exploding candidate carriers...")
+    # ``_cands`` was narrowed and checkpointed by :func:`_scan_for_candidates`;
+    # explode straight from it rather than re-materializing.
+    logger.info("Exploding candidate carriers...")
     ht = ht.explode("_cands")
     ht = ht.select(_mnv=_classify_entry(ht._cands))
     ht = ht.filter(hl.len(ht._mnv) > 0)
@@ -395,8 +417,9 @@ def _parse_intervals(values: list[str]) -> list[tuple[str, str]]:
                 " e.g. 'PCSK9=chr1:55039447-55064852'."
             )
         name, interval = value.split("=", 1)
-        # An empty name would reach _interval_suffix as [""], which is truthy
-        # and yields a bare "." in the output path.
+        # _interval_suffix drops an empty name silently (and a name that is
+        # empty alongside others yields a stray "_"), so the run's scope would
+        # not show up in the output path. Reject it rather than mislabel.
         if not name:
             raise ValueError(
                 f"Invalid --intervals value {value!r}; GENE_NAME must not be empty."
