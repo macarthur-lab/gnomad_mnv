@@ -176,3 +176,52 @@ Fix, if it ever matters: carry ploidy on the carried-alt record and require phas
 haploid call is paired with a diploid one. Phasing must not be required for two haploid
 calls — a single haplotype makes those cis by construction, which is why the current
 hom-hom handling of hemizygous pairs is correct.
+
+## 3. Scan combOp does not prune, so per-partition state grows with partition count
+
+**Status:** known, un-fixed, deliberately shelved. Correctness is unaffected — this is
+wasted payload, not wrong output.
+
+`hl.scan.fold`'s seqOp prunes the per-sample window on every row
+(`window.filter(_in_window)`), but the combOp does not:
+
+```python
+lambda a, b: hl.coalesce(hl.flatten([a, b]), a, b)
+```
+
+Hail builds a partition's scan *start* state by combining every preceding partition's
+final state, so the state handed to partition `p` is `s_0 ++ ... ++ s_{p-1}` per sample,
+and the total serialized across a run grows with the square of the partition count. The
+seqOp re-prunes on the partition's first row, so nothing incorrect reaches the output; the
+cost is serialization and broadcast. A single gene (PCNT) is 10 partitions and unaffected;
+a 6.7 Mb chr21 window is already 210.
+
+### The fix, and why it is not the obvious one
+
+Prune `a` — never `b`, which holds the most recent entries — keeping an entry only if some
+entry in `b` is within `max_distance` on the same contig. That is safe because every future
+row sits at or beyond all of `b`, so if a future row could pair with `x` then the `b` entry
+nearest it also pairs with `x`.
+
+Two traps for whoever implements this:
+
+1. **Do not prune against `b`'s last element by indexing.** Inside a `hl.scan.fold` nested
+   in `hl.scan.array_agg`, Hail cannot emit `ApplyIR` nodes — both array indexing (`b[-1]`,
+   `b[hl.len(b) - 1]`) and `.extend()` fail with `ir is not defined in emit or emitI`.
+   `hl.flatten`, `.map`, `.filter`, `hl.any`, `hl.max` and `array.fold` are all fine, hence
+   the pairwise formulation. Note this only reproduces when the fold is nested inside
+   `array_agg`; a bare `hl.scan.fold` compiles all of them.
+2. **Preserve the missing-side semantics.** `hl.flatten` skips missing inner arrays rather
+   than propagating missing, so merging two missing states yields a *defined empty array*,
+   not missing. The seqOp treats `[]` and missing identically, but any rewrite must handle
+   the empty cases explicitly rather than assuming the state is missing-or-non-empty.
+
+### Why it is shelved
+
+An implementation was written and verified output-identical on two harnesses, including a
+dense 240-site / 24-partition / 2-contig case. It was **not** shown to be faster: PCNT has
+too few partitions to exercise it, and a chr21-window comparison was abandoned as
+disproportionately expensive. Given that a similarly well-argued, provably-correct
+optimisation in the same file (hoisting `hl.min_rep` to a row-level array) measured 56%
+*slower*, this one should not be adopted without a measurement at realistic partition
+count.

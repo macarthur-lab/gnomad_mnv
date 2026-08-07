@@ -140,11 +140,12 @@ def _get_carried_alts(entry: hl.expr.StructExpression) -> hl.expr.ArrayExpressio
                 locus=mr.locus,
                 alleles=mr.alleles,
                 # Genotype-level: every alt of a call shares it, so 1/2 gives
-                # False on both. Haploid calls are hom-var in Hail (local allele
-                # space doesn't change that — only index equality matters and
-                # LA[0] is always 0), so hemizygous alts get is_hom=True and
-                # count in n_homhom. het-hom's unconditional-cis rule leans on
-                # this flag; see KNOWN_ISSUES.md #2 for the one gap.
+                # False on both. Haploid calls are hom-var in Hail, and the
+                # predicate only tests whether the call's allele indices are
+                # equal and non-zero, so local allele space does not change it.
+                # Hemizygous alts therefore get is_hom=True and count in
+                # n_homhom. het-hom's unconditional-cis rule leans on this flag;
+                # see KNOWN_ISSUES.md #2 for the one gap.
                 is_hom=entry.LGT.is_hom_var(),
                 # ``find`` (not a fixed index) so it's ploidy-safe and yields
                 # missing — never a wrong index — if LPGT doesn't carry li.
