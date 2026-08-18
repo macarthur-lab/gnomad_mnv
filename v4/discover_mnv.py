@@ -101,10 +101,12 @@ def _carries_snv(entry: hl.expr.StructExpression) -> hl.expr.BooleanExpression:
     """
     Check if an entry carries at least one SNV alt, i.e. can form an MNV pair.
 
-    Gates entry into the scan window. Stricter than :func:`_is_nonref`: a carrier
-    of only indel alts at a mixed site passes ``_is_nonref`` but can never
-    contribute a pair, since classification keeps SNP-SNP pairs only. Excluding
-    it here keeps it out of the window, the ``prev`` structs and the checkpoint.
+Decides whether an entry enters the scan window. :func:`_is_nonref` isn't
+enough: at a site with both SNV and indel alts, a sample may carry only the
+indel — non-ref, yet its ``_alts`` is empty because :func:`_get_carried_alts`
+keeps SNV alts only. Such an entry can never yield an output pair
+(classification keeps SNP-SNP pairs only), so excluding it here prevents
+bloating the window state, the ``prev`` arrays, and the checkpoint.
 
     :param entry: Entry expression with the ``_alts`` field built by
         :func:`_get_carried_alts` (missing for ref entries).
@@ -139,13 +141,13 @@ def _get_carried_alts(entry: hl.expr.StructExpression) -> hl.expr.ArrayExpressio
             lambda mr: hl.struct(
                 locus=mr.locus,
                 alleles=mr.alleles,
-                # Genotype-level: every alt of a call shares it, so 1/2 gives
-                # False on both. Haploid calls are hom-var in Hail, and the
-                # predicate only tests whether the call's allele indices are
-                # equal and non-zero, so local allele space does not change it.
-                # Hemizygous alts therefore get is_hom=True and count in
-                # n_homhom. het-hom's unconditional-cis rule leans on this flag;
-                # see KNOWN_ISSUES.md #2 for the one gap.
+ # is_hom describes the whole call: every alt record from one
+                # call gets the same value (1/2 -> False on both). Haploid calls are hom-var in Hail, 
+                # and the predicate only tests whether the call's allele indices are
+                # equal and non-zero, working in local allele space does not change 
+                # the answer is_hom_var() gives. Hemizygous alts get is_hom=True and count in 
+                # n_homhom (correctly cis: one haplotype). het-hom's unconditional-cis rule leans on this
+                # flag; see KNOWN_ISSUES.md #2 for the one gap.
                 is_hom=entry.LGT.is_hom_var(),
                 # ``find`` (not a fixed index) so it's ploidy-safe and yields
                 # missing — never a wrong index — if LPGT doesn't carry li.
@@ -378,8 +380,14 @@ def _aggregate_mnv_pairs(ht: hl.Table) -> hl.Table:
     Count occurrences per variant pair: raw (all carriers) and ``_adj`` (both
     genotypes pass adj), split into het-het / hom-hom / het-hom.
 
-    :param ht: Output of :func:`_classify_mnv_pairs` (one ``_mnv`` per row).
-    :return: Table keyed by (locus, alleles, prev_locus, prev_alleles).
+    :param ht: Table output of :func:`_classify_mnv_pairs` (one ``_mnv`` per row).
+    :return: Table keyed by the later SNV of the pair (``locus``, ``alleles``)
+        then the earlier (``prev_locus``, ``prev_alleles``), with the eight
+        ``n_*`` counts and ``dist``, the min-repped-locus distance
+        (``locus.position - prev_locus.position``). ``dist`` can fall outside
+        ``[1, max_distance]`` when min-rep shifted a locus (see
+        KNOWN_ISSUES.md #1); the post-write guard in ``main`` flags — but does
+        not drop — such rows.
     """
     per_pair = ht.group_by(
         locus=ht._mnv.cur_locus,
