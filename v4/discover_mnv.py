@@ -87,6 +87,9 @@ DEFAULT_TEST_GENES = [
 ]
 """Default gene(s)/interval(s) used when ``--intervals`` is given with no values."""
 
+DEFAULT_TEST_GENES_STR = " ".join(f"{n}={i}" for n, i in DEFAULT_TEST_GENES)
+"""CLI-help rendering of :data:`DEFAULT_TEST_GENES`."""
+
 
 # ---------------------------------------------------------------------------
 # Expression helpers
@@ -489,6 +492,14 @@ def _drop_all_lowqual_sites(mt: hl.MatrixTable) -> hl.MatrixTable:
     The unsplit info HT (``AS_lowqual`` is ``array<bool>`` over alts) is re-read
     with the variant_data's partition intervals so the join needs no shuffle.
 
+    .. note::
+
+        This is deliberately site-level, not per-alt: at a mixed site, a lowqual
+        SNP alt still enters the scan and can be emitted as a pair. Discovery
+        stays a superset of the release; such pairs surface downstream with
+        missing release annotations (see :func:`annotate_mnv`) and can be
+        filtered there.
+
     :param mt: MatrixTable of variant data keyed by ``(locus, alleles)``.
     :return: ``mt`` with all-AS_lowqual sites removed.
     """
@@ -630,10 +641,13 @@ def annotate_mnv(mnv_ht: hl.Table, release_ht: hl.Table, vep_ht: hl.Table) -> hl
 
     .. note::
 
-        Discovery runs on the VDS, so a discovered SNV can be absent from the
-        release entirely; its annotation fields come back missing. Missing
-        ``filters`` is not PASS — PASS is an *empty set* — so distinguish
-        not-in-release (missing) from passing (empty) when consuming this table.
+        Discovery runs on the (optionally filtered) VDS, not on release
+        variants, so a discovered SNV can be absent from the release entirely —
+        e.g. carried only by non-release samples, AC=0 after adj, or AS_lowqual
+        at a mixed site. For those rows ``filters``/AC/AF/``vep`` come back
+        missing. Missing ``filters`` is not PASS — PASS is an *empty set* — so
+        distinguish not-in-release (missing) from passing (empty) when consuming
+        this table.
 
     :param mnv_ht: MNV Hail Table output from :func:`discover_mnv`.
     :param release_ht: Release sites HT supplying AC/AF/filters for both SNVs. Within
@@ -835,16 +849,13 @@ if __name__ == "__main__":
         help="Write output to the test bucket instead of the production bucket.",
         action="store_true",
     )
-    default_test_genes_str = " ".join(
-        f"{name}={interval}" for name, interval in DEFAULT_TEST_GENES
-    )
     parser.add_argument(
         "--intervals",
         help=(
             "Subset discovery to one or more 'GENE_NAME=INTERVAL' pairs, e.g."
             " 'PCSK9=chr1:55039447-55064852 PCNT=chr21:46324141-46445769'. Implies"
             " --test; gene names are appended to output paths so runs don't"
-            f" overwrite each other. Defaults to {default_test_genes_str} if given"
+            f" overwrite each other. Defaults to {DEFAULT_TEST_GENES_STR} if given"
             " with no values. Cannot be combined with --chr."
         ),
         nargs="*",
