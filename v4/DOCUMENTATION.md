@@ -15,7 +15,8 @@ and the [paper](https://www.nature.com/articles/s41467-019-12438-5).
 v4/
 ├── __init__.py          # Package init
 ├── resources.py         # Data loading, GCS output paths, TableResource definitions
-└── discover_mnv.py      # MNV discovery (scan-based) and frequency/VEP annotation
+├── discover_mnv.py      # MNV discovery (scan-based) and frequency/VEP annotation
+└── KNOWN_ISSUES.md      # Documented edge cases and shelved optimizations
 ```
 
 ### Dependencies
@@ -24,9 +25,10 @@ v4/
   gnomAD v4 exomes VDS with standard sample filtering (hard filters, UKB exclusions).
 - **gnomad_methods** (`gnomad.resources`): `TableResource`, `public_release("exomes")` —
   frequency and filter annotations from the gnomAD v4.1 exomes release. Read once in
-  `main` and passed to both steps, so within one invocation the hotfix AF and the
-  reported AC/AF/filters come from the same release. Running `--discover` and
-  `--annotate` as separate invocations reads it once each.
+  `main` and passed to both steps so the hotfix AF and the reported AC/AF/filters are
+  guaranteed to come from the same read. Running `--discover` and `--annotate` as
+  separate invocations reads it independently each time, so consistency across the two
+  runs isn't guaranteed if the underlying release changes between them.
 - **gnomad_qc** (`gnomad_qc.v4.resources.annotations`): `get_vep("exomes")` — VEP
   transcript consequences for v4 exomes.
 
@@ -235,8 +237,8 @@ table, returns annotated Table.
 
 | Function | Returns | Description |
 |----------|---------|-------------|
-| `mnv_discovery(test=False)` | `TableResource` | Discovery output path |
-| `mnv_annotated(test=False)` | `TableResource` | Annotated output path |
+| `get_discovered_mnvs(test=False)` | `TableResource` | Discovery output path |
+| `get_annotated_mnvs(test=False)` | `TableResource` | Annotated output path |
 | `get_gnomad_v4_vds(...)` | `VariantDataset` | Loads unsplit VDS via `gnomad_qc` |
 | `get_gnomad_v4_ukb_vds(...)` | `VariantDataset` | Loads the UKB-only VDS subset (`--ukb-only`) |
 | `UKB_VDS` | `VariantDatasetResource` | Path to the pre-built UKB-only VDS subset |

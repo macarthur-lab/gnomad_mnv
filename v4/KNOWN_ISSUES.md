@@ -148,8 +148,10 @@ SNP (a SNP co-located with an indel), not just first-base SNPs.
 
 ## 2. het-hom cis assumption when one side is hemizygous
 
-**Status:** known, un-fixed, no code spent on it. Effectively unreachable. Raised in PR #6
-review.
+**Status:** known, un-fixed, no code spent on it. Reachable only by a pair straddling a
+PAR boundary (see below) — a case requiring an XY sample with variants ≤ `max_distance`
+bp apart on opposite sides of the exact boundary, in a run covering it; never observed
+and not tested. Raised in PR #6 review.
 
 `_classify_alt_pair` treats het-hom as unconditionally cis, on the reasoning that a hom
 genotype occupies both haplotypes so the pair must share one. A hemizygous call has only

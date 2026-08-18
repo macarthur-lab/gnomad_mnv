@@ -1,5 +1,7 @@
 """Resource paths and data loading utilities for gnomAD v4 MNV discovery."""
 
+from typing import List, Optional, Union
+
 import hail as hl
 from gnomad.resources.resource_utils import TableResource, VariantDatasetResource
 
@@ -42,7 +44,7 @@ def _mnv_root_path(
     )
 
 
-def _interval_suffix(interval_names: list[str] | None) -> str:
+def _interval_suffix(interval_names: Optional[List[str]]) -> str:
     """Build a filename suffix labeling the interval(s) a run was scoped to.
 
     :param interval_names: Optional list of labels (gene names, or a single
@@ -54,14 +56,14 @@ def _interval_suffix(interval_names: list[str] | None) -> str:
     return f".{joined}" if joined else ""
 
 
-def mnv_discovery(
+def get_discovered_mnvs(
     version: str = CURRENT_VERSION,
     test: bool = False,
     data_type: str = "exomes",
-    interval_names: list[str] | None = None,
+    interval_names: Optional[List[str]] = None,
     ukb_only: bool = False,
-    chrom: str | None = None,
-    suffix: str | None = None,
+    chrom: Optional[str] = None,
+    suffix: Optional[str] = None,
 ) -> TableResource:
     """Get the MNV discovery TableResource.
 
@@ -83,7 +85,6 @@ def mnv_discovery(
         written to a distinct path. Default is None.
     :param suffix: Optional free-form filename suffix (e.g. a username) appended
         last, so a run doesn't overwrite anyone else's output. Default is None.
-    :raises ValueError: If both ``chrom`` and ``interval_names`` are given.
     :return: TableResource for MNV discovery output.
     """
     if chrom and interval_names:
@@ -103,14 +104,14 @@ def mnv_discovery(
     )
 
 
-def mnv_annotated(
+def get_annotated_mnvs(
     version: str = CURRENT_VERSION,
     test: bool = False,
     data_type: str = "exomes",
-    interval_names: list[str] | None = None,
+    interval_names: Optional[List[str]] = None,
     ukb_only: bool = False,
-    chrom: str | None = None,
-    suffix: str | None = None,
+    chrom: Optional[str] = None,
+    suffix: Optional[str] = None,
 ) -> TableResource:
     """Get the annotated MNV TableResource.
 
@@ -132,7 +133,6 @@ def mnv_annotated(
         written to a distinct path. Default is None.
     :param suffix: Optional free-form filename suffix (e.g. a username) appended
         last, so a run doesn't overwrite anyone else's output. Default is None.
-    :raises ValueError: If both ``chrom`` and ``interval_names`` are given.
     :return: TableResource for annotated MNV output.
     """
     if chrom and interval_names:
@@ -153,7 +153,7 @@ def mnv_annotated(
 
 
 def get_gnomad_v4_vds(
-    filter_intervals: list[str | hl.tinterval] | None = None,
+    filter_intervals: Optional[List[Union[str, hl.tinterval]]] = None,
     high_quality_only: bool = False,
     release_only: bool = False,
 ) -> hl.vds.VariantDataset:
@@ -181,7 +181,7 @@ def get_gnomad_v4_vds(
 
 
 def get_gnomad_v4_ukb_vds(
-    filter_intervals: list[str | hl.tinterval] | None = None,
+    filter_intervals: Optional[List[Union[str, hl.tinterval]]] = None,
     high_quality_only: bool = False,
     release_only: bool = False,
 ) -> hl.vds.VariantDataset:

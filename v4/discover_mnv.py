@@ -35,6 +35,7 @@ Usage::
 import argparse
 import logging
 import time
+from typing import List, Optional, Tuple
 
 import hail as hl
 from gnomad.resources.grch38.gnomad import public_release
@@ -45,10 +46,10 @@ from gnomad_qc.v4.resources.meta import meta
 
 from v4.resources import (
     MNV_ENTRIES_TO_KEEP,
+    get_annotated_mnvs,
+    get_discovered_mnvs,
     get_gnomad_v4_ukb_vds,
     get_gnomad_v4_vds,
-    mnv_annotated,
-    mnv_discovery,
 )
 
 logging.basicConfig(
@@ -59,6 +60,11 @@ logger = logging.getLogger("discover_mnv")
 logger.setLevel(logging.INFO)
 
 MAX_MNV_DISTANCE = 2
+"""Default maximum distance in bp between the two SNVs of an MNV pair.
+
+2 keeps both SNVs within one codon frame, matching the v2 pipeline and the
+source paper; override per run with ``--max-distance``.
+"""
 
 HOM_ALT_FIX_AF_CUTOFF = 0.01
 """AF above which a high-AB het-ref call is reclassified to hom-alt.
@@ -101,12 +107,12 @@ def _carries_snv(entry: hl.expr.StructExpression) -> hl.expr.BooleanExpression:
     """
     Check if an entry carries at least one SNV alt, i.e. can form an MNV pair.
 
-Decides whether an entry enters the scan window. :func:`_is_nonref` isn't
-enough: at a site with both SNV and indel alts, a sample may carry only the
-indel — non-ref, yet its ``_alts`` is empty because :func:`_get_carried_alts`
-keeps SNV alts only. Such an entry can never yield an output pair
-(classification keeps SNP-SNP pairs only), so excluding it here prevents
-bloating the window state, the ``prev`` arrays, and the checkpoint.
+    Decides whether an entry enters the scan window. :func:`_is_nonref` isn't
+    enough because a site can carry both SNV and indel alts and a sample may carry only the
+    indel — non-ref, yet its ``_alts`` is empty because :func:`_get_carried_alts`
+    keeps SNV alts only. Such an entry can never yield an output pair
+    (classification keeps SNP-SNP pairs only), so excluding it here prevents
+    bloating the window state, the ``prev`` arrays, and the checkpoint.
 
     :param entry: Entry expression with the ``_alts`` field built by
         :func:`_get_carried_alts` (missing for ref entries).
@@ -117,7 +123,7 @@ bloating the window state, the ``prev`` arrays, and the checkpoint.
 
 def _get_carried_alts(entry: hl.expr.StructExpression) -> hl.expr.ArrayExpression:
     """
-    One record per distinct carried alt of a non-ref genotype.
+    Get one record per distinct carried alt of a non-ref genotype.
 
     An array (not one struct) so het_non_ref (``1/2``) contributes both alts;
     het-ref/hom-var yield one. Alleles are min-repped so output keys join the
@@ -141,13 +147,15 @@ def _get_carried_alts(entry: hl.expr.StructExpression) -> hl.expr.ArrayExpressio
             lambda mr: hl.struct(
                 locus=mr.locus,
                 alleles=mr.alleles,
- # is_hom describes the whole call: every alt record from one
-                # call gets the same value (1/2 -> False on both). Haploid calls are hom-var in Hail, 
-                # and the predicate only tests whether the call's allele indices are
-                # equal and non-zero, working in local allele space does not change 
-                # the answer is_hom_var() gives. Hemizygous alts get is_hom=True and count in 
-                # n_homhom (correctly cis: one haplotype). het-hom's unconditional-cis rule leans on this
-                # flag; see KNOWN_ISSUES.md #2 for the one gap.
+                # is_hom describes the whole call: every alt record from one
+                # call gets the same value (1/2 -> False on both). Haploid calls
+                # are hom-var in Hail, and the predicate only tests whether the
+                # call's allele indices are equal and non-zero, so working in
+                # local allele space does not change the answer is_hom_var()
+                # gives. Hemizygous alts get is_hom=True and count in n_homhom
+                # (correctly cis: one haplotype). het-hom's unconditional-cis
+                # rule leans on this flag; see KNOWN_ISSUES.md #2 for the one
+                # gap.
                 is_hom=entry.LGT.is_hom_var(),
                 # ``find`` (not a fixed index) so it's ploidy-safe and yields
                 # missing — never a wrong index — if LPGT doesn't carry li.
@@ -178,8 +186,10 @@ def _classify_alt_pair(
     Valid in local allele space: het/hom status and the haplotype index are the
     same as post-split. het-het needs both phased into the same phase set and
     haplotype to confirm cis; het-hom is unconditionally cis because a hom
-    occupies both haplotypes. A non-cis het pair matches none and is dropped
-    downstream.
+    occupies both haplotypes. A het pair whose cis status is unconfirmed matches
+    none and is dropped downstream — that covers genuinely trans pairs, but also
+    cis pairs that are unphased, in different phase sets, or PID-missing, so
+    het-het is a conservative undercount rather than an exact measure.
 
     :param current_alt: Current carried-alt record (with ``is_hom``, ``hap``).
     :param prev_alt: Previous carried-alt record (with ``is_hom``, ``hap``).
@@ -410,7 +420,7 @@ def _aggregate_mnv_pairs(ht: hl.Table) -> hl.Table:
     )
 
 
-def _parse_intervals(values: list[str]) -> list[tuple[str, str]]:
+def _parse_intervals(values: List[str]) -> List[Tuple[str, str]]:
     """
     Parse ``--intervals`` values into (gene_name, interval) pairs.
 
@@ -450,8 +460,8 @@ def _normalize_chrom(value: str) -> str:
 
 def _per_alt_af(mt: hl.MatrixTable, release_ht: hl.Table) -> hl.Table:
     """
-    Per-alt release-AF row array for the hom-alt hotfix: ``_alt_af[g-1]`` is
-    the release AF of global alt ``g``.
+    Build the per-alt release-AF row array for the hom-alt hotfix: ``_alt_af[g-1]``
+    is the release AF of global alt ``g``.
 
     :param mt: MatrixTable keyed by ``(locus, alleles)``.
     :param release_ht: Split release HT keyed by ``(locus, alleles)``; ``freq[0].AF``
@@ -479,7 +489,7 @@ def _drop_all_lowqual_sites(mt: hl.MatrixTable) -> hl.MatrixTable:
     The unsplit info HT (``AS_lowqual`` is ``array<bool>`` over alts) is re-read
     with the variant_data's partition intervals so the join needs no shuffle.
 
-    :param mt: variant_data MatrixTable keyed by ``(locus, alleles)``.
+    :param mt: MatrixTable of variant data keyed by ``(locus, alleles)``.
     :return: ``mt`` with all-AS_lowqual sites removed.
     """
     intervals = mt._calculate_new_partitions(mt.n_partitions())
@@ -500,8 +510,8 @@ def discover_mnv(
     vds: hl.vds.VariantDataset,
     release_ht: hl.Table,
     max_distance: int = MAX_MNV_DISTANCE,
-    entries_to_keep: list[str] = MNV_ENTRIES_TO_KEEP,
-    classify_n_partitions: int | None = None,
+    entries_to_keep: List[str] = MNV_ENTRIES_TO_KEEP,
+    classify_n_partitions: Optional[int] = None,
 ) -> hl.Table:
     """
     Run single-pass MNV discovery on an unsplit VDS.
@@ -525,8 +535,7 @@ def discover_mnv(
 
     :param vds: Unsplit gnomAD v4 VariantDataset.
     :param release_ht: Release sites HT supplying the per-alt AF the hom-alt
-        depletion hotfix compares against. Passed in (rather than read here) so a
-        single ``--discover --annotate`` invocation reads one release table.
+        depletion hotfix compares against.
     :param max_distance: Max bp between the two SNVs. Default 2 (codon frame).
     :param entries_to_keep: Entry fields to keep (global/post-split names).
     :param classify_n_partitions: If set, repartition before classification.
@@ -619,6 +628,13 @@ def annotate_mnv(mnv_ht: hl.Table, release_ht: hl.Table) -> hl.Table:
     Exomes release, not joint: the joint table lacks ``filters`` and
     per-data-type frequency arrays (only ``joint_freq``/``joint_faf``).
 
+    .. note::
+
+        Discovery runs on the VDS, so a discovered SNV can be absent from the
+        release entirely; its annotation fields come back missing. Missing
+        ``filters`` is not PASS — PASS is an *empty set* — so distinguish
+        not-in-release (missing) from passing (empty) when consuming this table.
+
     :param mnv_ht: MNV Hail Table output from :func:`discover_mnv`.
     :param release_ht: Release sites HT supplying AC/AF/filters for both SNVs. Within
         one invocation this is the same table :func:`discover_mnv` is given, so the
@@ -654,15 +670,15 @@ def main(args: argparse.Namespace) -> None:
         tmp_dir="gs://gnomad-tmp-4day/discover_mnv",
     )
 
-    gene_names: list[str] | None = None
-    intervals: list[str] | None = None
-    chrom: str | None = None
+    gene_names = None
+    intervals = None
+    chrom = None
 
     if args.chr is not None:
         chrom = _normalize_chrom(args.chr)
         intervals = [chrom]
     elif args.intervals is not None:
-        parsed: list[tuple[str, str]] = (
+        parsed = (
             _parse_intervals(args.intervals) if args.intervals else DEFAULT_TEST_GENES
         )
         gene_names = [name for name, _ in parsed]
@@ -711,7 +727,7 @@ def main(args: argparse.Namespace) -> None:
             ),
         )
 
-        discovery_resource = mnv_discovery(
+        discovery_resource = get_discovered_mnvs(
             test=test_enabled,
             interval_names=gene_names,
             ukb_only=args.ukb_only,
@@ -733,7 +749,9 @@ def main(args: argparse.Namespace) -> None:
         )
         n_bad = outliers.count()
         if n_bad:
-            outlier_path = discovery_resource.path[: -len(".ht")] + ".dist_outliers.ht"
+            outlier_path = (
+                discovery_resource.path.removesuffix(".ht") + ".dist_outliers.ht"
+            )
             outliers.write(outlier_path, overwrite=args.overwrite)
             logger.warning(
                 "%d MNV pair(s) have dist outside [1, %d] — a SNP's locus likely"
@@ -750,7 +768,7 @@ def main(args: argparse.Namespace) -> None:
 
     if args.annotate:
         logger.info("Annotating MNV pairs with frequency and VEP data...")
-        mnv_ht = mnv_discovery(
+        mnv_ht = get_discovered_mnvs(
             test=test_enabled,
             interval_names=gene_names,
             ukb_only=args.ukb_only,
@@ -759,7 +777,7 @@ def main(args: argparse.Namespace) -> None:
         ).ht()
         mnv_ht = annotate_mnv(mnv_ht, release_ht)
 
-        annotated_resource = mnv_annotated(
+        annotated_resource = get_annotated_mnvs(
             test=test_enabled,
             interval_names=gene_names,
             ukb_only=args.ukb_only,
