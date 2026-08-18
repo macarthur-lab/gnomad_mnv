@@ -621,7 +621,7 @@ def discover_mnv(
     return _aggregate_mnv_pairs(ht)
 
 
-def annotate_mnv(mnv_ht: hl.Table, release_ht: hl.Table) -> hl.Table:
+def annotate_mnv(mnv_ht: hl.Table, release_ht: hl.Table, vep_ht: hl.Table) -> hl.Table:
     """
     Add AC/AF/filters (exomes release) and VEP to both SNVs of each pair.
 
@@ -639,6 +639,7 @@ def annotate_mnv(mnv_ht: hl.Table, release_ht: hl.Table) -> hl.Table:
     :param release_ht: Release sites HT supplying AC/AF/filters for both SNVs. Within
         one invocation this is the same table :func:`discover_mnv` is given, so the
         hotfix AF and the reported frequencies come from one release.
+    :param vep_ht: VEP HT supplying transcript consequences for both SNVs.
     :return: MNV Table with AC, AF, filters, and VEP for both SNVs.
     """
     snv2_data = release_ht[mnv_ht.locus, mnv_ht.alleles]
@@ -652,7 +653,6 @@ def annotate_mnv(mnv_ht: hl.Table, release_ht: hl.Table) -> hl.Table:
         prev_AF=snv1_data.freq[0].AF,
     )
 
-    vep_ht = get_vep(data_type="exomes").ht()
     return mnv_ht.annotate(
         vep=vep_ht[mnv_ht.locus, mnv_ht.alleles].vep,
         prev_vep=vep_ht[mnv_ht.prev_locus, mnv_ht.prev_alleles].vep,
@@ -715,16 +715,13 @@ def main(args: argparse.Namespace) -> None:
             release_only=args.release_only,
         )
 
-        # classify_n_partitions only at --intervals scale: it shuffles the
-        # widened table, too costly for --chr / full-cohort runs.
+        # classify_n_partitions is --intervals-only; the CLI rejects it otherwise.
         mnv_ht = discover_mnv(
             vds,
             release_ht,
             max_distance=args.max_distance,
             entries_to_keep=MNV_ENTRIES_TO_KEEP,
-            classify_n_partitions=(
-                args.classify_n_partitions if args.intervals is not None else None
-            ),
+            classify_n_partitions=args.classify_n_partitions,
         )
 
         discovery_resource = get_discovered_mnvs(
@@ -743,16 +740,16 @@ def main(args: argparse.Namespace) -> None:
         # emitted pair whose distance is outside [1, max_distance]. Write those
         # rows to a sibling HT so they can be triaged later (see
         # v4/KNOWN_ISSUES.md); they are NOT dropped from the discovery output.
+        # Written even when empty, so a clean rerun replaces any stale outliers
+        # table from a previous run at the same path.
         written = discovery_resource.ht()
         outliers = written.filter(
             (written.dist < 1) | (written.dist > args.max_distance)
         )
         n_bad = outliers.count()
+        outlier_path = discovery_resource.path.removesuffix(".ht") + ".dist_outliers.ht"
+        outliers.write(outlier_path, overwrite=args.overwrite)
         if n_bad:
-            outlier_path = (
-                discovery_resource.path.removesuffix(".ht") + ".dist_outliers.ht"
-            )
-            outliers.write(outlier_path, overwrite=args.overwrite)
             logger.warning(
                 "%d MNV pair(s) have dist outside [1, %d] — a SNP's locus likely"
                 " shifted inside a padded multi-allelic ref during min-rep. Wrote"
@@ -762,6 +759,8 @@ def main(args: argparse.Namespace) -> None:
                 args.max_distance,
                 outlier_path,
             )
+        else:
+            logger.info("No dist outliers (wrote empty %s).", outlier_path)
 
         elapsed = time.time() - start
         logger.info("Finished MNV discovery in %.1f seconds.", elapsed)
@@ -775,7 +774,8 @@ def main(args: argparse.Namespace) -> None:
             chrom=chrom,
             suffix=args.output_suffix,
         ).ht()
-        mnv_ht = annotate_mnv(mnv_ht, release_ht)
+        vep_ht = get_vep(data_type="exomes").ht()
+        mnv_ht = annotate_mnv(mnv_ht, release_ht, vep_ht)
 
         annotated_resource = get_annotated_mnvs(
             test=test_enabled,
@@ -907,7 +907,7 @@ if __name__ == "__main__":
         "--classify-n-partitions",
         help=(
             "If set, repartition to this many partitions before classification."
-            " Only applied with --intervals: it shuffles the fully-widened table,"
+            " Requires --intervals: it shuffles the fully-widened table,"
             " too costly for a full-cohort run. Pass it (e.g."
             f" {CLASSIFY_N_PARTITIONS}) if an --intervals run hits a Hail off-heap"
             " memory error during classification."
@@ -923,5 +923,11 @@ if __name__ == "__main__":
         parser.error(
             "--chr and --intervals both scope which intervals to load; pass only"
             " one."
+        )
+    if args.classify_n_partitions is not None and args.intervals is None:
+        parser.error(
+            "--classify-n-partitions requires --intervals: the repartition"
+            " shuffles the fully-widened table, too costly for --chr or"
+            " full-cohort runs."
         )
     main(args)
