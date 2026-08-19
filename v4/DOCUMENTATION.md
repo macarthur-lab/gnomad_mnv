@@ -110,7 +110,7 @@ for `sparse_split_multi`.
    `unfilter_entries`/densify (see below). Each non-ref entry gets `_alts`: one record per
    distinct carried **SNV** alt (`locus`, `alleles`, `is_hom`, `hap`), ploidy-safe.
    Indel alts are dropped here, so they never enter the scan window. Keep only
-   LGT, PID, adj, `_alts` per entry.
+   PID, adj, `_alts` per entry (LGT is consumed building `_alts` and dropped).
 7. **Scan** (`_scan_for_candidates`): Per-sample `hl.scan.fold` tracks a sliding window
    of recent non-ref entries. Each entry stores `(locus, entry_struct)`. The window is
    pruned by distance and contig at each row.

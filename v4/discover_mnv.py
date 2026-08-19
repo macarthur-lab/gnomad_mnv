@@ -35,7 +35,6 @@ Usage::
 import argparse
 import logging
 import time
-from typing import List, Optional, Tuple
 
 import hail as hl
 from gnomad.resources.grch38.gnomad import public_release
@@ -223,7 +222,7 @@ def _scan_for_candidates(ht: hl.Table, max_distance: int) -> hl.Table:
     Annotate each non-ref entry with its window of nearby prior non-ref
     entries (``prev``), then keep rows where some sample has a candidate pair.
 
-    :param ht: Localized Table; entries carry ``LGT`` plus the precomputed
+    :param ht: Localized Table; entries carry the precomputed
         ``_alts``/``PID``/``adj`` used downstream.
     :param max_distance: Maximum bp distance between two SNVs.
     :return: Table with a ``_cands`` array of candidate carrier entries (each
@@ -423,7 +422,7 @@ def _aggregate_mnv_pairs(ht: hl.Table) -> hl.Table:
     )
 
 
-def _parse_intervals(values: List[str]) -> List[Tuple[str, str]]:
+def _parse_intervals(values: list[str]) -> list[tuple[str, str]]:
     """
     Parse ``--intervals`` values into (gene_name, interval) pairs.
 
@@ -521,8 +520,8 @@ def discover_mnv(
     vds: hl.vds.VariantDataset,
     release_ht: hl.Table,
     max_distance: int = MAX_MNV_DISTANCE,
-    entries_to_keep: List[str] = MNV_ENTRIES_TO_KEEP,
-    classify_n_partitions: Optional[int] = None,
+    entries_to_keep: list[str] = MNV_ENTRIES_TO_KEEP,
+    classify_n_partitions: int | None = None,
 ) -> hl.Table:
     """
     Run single-pass MNV discovery on an unsplit VDS.
@@ -613,7 +612,10 @@ def discover_mnv(
                         entry.annotate(_alleles=ht.alleles, _locus=ht.locus)
                     ),
                 )
-            ).select("LGT", "PID", "adj", "_alts")
+                # LGT is consumed above (_is_nonref and _get_carried_alts); dropping
+                # it here keeps it out of the scan window, the ``prev`` structs, and
+                # the checkpoint, all of which duplicate every window entry.
+            ).select("PID", "adj", "_alts")
         )
     )
 
