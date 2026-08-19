@@ -90,19 +90,12 @@ SNP alt `GTCGGG` differs from ref at position 1, so
 ### Current mitigation
 
 - `_aggregate_mnv_pairs` computes `dist` from the min-repped loci.
-- A post-write guard in `main()` reads the written discovery HT back, `logger.warning`s
-  the count of pairs with `dist` outside `[1, max_distance]`, and writes those rows to a
-  sibling `*.dist_outliers.ht` (path derived from the discovery output) for triage.
+- A post-write guard in `main()` reads the written discovery HT back and writes pairs
+  with `dist` outside `[1, max_distance]` to a sibling `*.dist_outliers.ht` for triage
+  (always written, empty when clean, so a rerun replaces any stale outliers table), with
+  a `logger.warning` when any exist.
   **It only detects already-emitted (false-positive) pairs; it does not drop them from
   the discovery output, and it cannot see never-formed (false-negative) pairs.**
-
-### How it was found
-
-An independent `split_multi` "oracle" (classic biallelic per-sample pairing, entirely
-partition- and scan-independent) matched the pipeline exactly on the validated regions on
-min-repped keys. A subsequent two-model code review (Opus + Sonnet) then independently
-flagged both symptoms; both models agreed on both when scored on a neutral validation
-prompt.
 
 ### Options to fix (if you decide to)
 
@@ -131,7 +124,8 @@ theoretical at `max_distance = 2`.
 
 ### How to re-verify a fix
 
-Rebuild the `split_multi` oracle: load the VDS for a region, `hl.vds.split_multi` +
+Build a `split_multi` oracle (partition- and scan-independent biallelic per-sample
+pairing): load the VDS for a region, `hl.vds.split_multi` +
 `hl.vds.to_dense_mt`, apply the same preprocessing as discovery (all-lowqual-site drop,
 hom-alt hotfix; sex ploidy is a no-op on autosomes; adj not needed for raw counts), then
 pair carried SNVs per sample via `group_by(s)` + explicit within-`max_distance` pairing on

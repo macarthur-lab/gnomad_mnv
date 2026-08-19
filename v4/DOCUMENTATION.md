@@ -72,7 +72,7 @@ CLI arguments:
 | `--chr N` | Run on a single whole chromosome (e.g. `--chr 21`, `--chr X`); writes to the production bucket. Mutually exclusive with `--intervals` |
 | `--ukb-only` | Use the UKB-only VDS subset; adds `.ukb_only` to the output path |
 | `--output-suffix S` | Free-form suffix appended last to the output path, so runs don't overwrite each other |
-| `--classify-n-partitions N` | Repartition before classification. Only applied with `--intervals` |
+| `--classify-n-partitions N` | Repartition before classification. Requires `--intervals` (rejected otherwise) |
 | `--overwrite` | Overwrite existing output files |
 | `--max-distance N` | Max bp distance between SNVs (default: 2) |
 | `--high-quality-only` | Filter to high-quality samples only |
@@ -112,12 +112,15 @@ for `sparse_split_multi`.
    Indel alts are dropped here, so they never enter the scan window. Keep only
    PID, adj, `_alts` per entry (LGT is consumed building `_alts` and dropped).
 7. **Scan** (`_scan_for_candidates`): Per-sample `hl.scan.fold` tracks a sliding window
-   of recent non-ref entries. Each entry stores `(locus, entry_struct)`. The window is
-   pruned by distance and contig at each row.
-8. **Classify** (`_classify_mnv_pairs`): Filter to candidate carriers (entries with a
-   `prev` window), `explode` to one row per carrier, then classify every
-   `cur._alts × prev._alts` alt pair; a pair's `adj` = both entries' adj. Exploding
-   before building pair arrays bounds per-task memory (no classify repartition needed).
+   of recent SNV-carrying entries (gated by `_carries_snv`). Each entry stores
+   `(locus, entry_struct)`; the window is pruned by distance and contig at each row.
+   Rows are then narrowed to their candidate carriers (`_cands`, entries with a `prev`
+   window) and checkpointed — the widened all-sample entries array is never
+   materialized.
+8. **Classify** (`_classify_mnv_pairs`): `explode` to one row per candidate carrier,
+   then classify every `cur._alts × prev._alts` alt pair; a pair's `adj` = both
+   entries' adj. Exploding before building pair arrays bounds per-task memory (no
+   classify repartition needed).
 9. **Aggregate** (`_aggregate_mnv_pairs`): `group_by(locus, alleles, prev_locus,
    prev_alleles)` across all samples, emitting raw and `_adj` counts.
 
@@ -142,36 +145,26 @@ Applied per `cur._alts × prev._alts` alt pair (records from `_get_carried_alts`
 **Sex chromosomes.** `adjusted_sex_ploidy_expr` sets non-PAR XY het calls to missing
 (only non-het calls become haploid), and `_is_nonref` then drops them, so on non-PAR
 chrX/Y an XY sample contributes only hom-hom pairs. XX calls on chrY are set to missing
-outright, so XX contributes nothing there at all. `--chr X`/`Y` output is therefore
-incomplete for XY samples, not merely unvalidated — and on chrY it is barely usable:
+outright. `--chr X`/`Y` output is therefore incomplete for XY samples, not merely
+unvalidated. Measured: chrX non-PAR (G6PD) drops 17.3% of non-ref XY calls as hets
+(5.5% of adj-quality calls); chrY non-PAR drops ~95% — chrY discards nearly all quality
+calls as artifact hets and should not be released without a decision on hemizygous
+modelling. Every surviving haploid call classified hom-hom on both chromosomes, and XX
+on chrY produced zero pairs, as expected.
 
-| | chrX non-PAR (G6PD) | chrY non-PAR (chrY:2781480-14000000) |
-|---|---|---|
-| non-ref XY calls, pre-ploidy | 1,230,965 | 222,672,048 |
-| dropped as hets | 17.3% | 94.7% |
-| dropped, counting only adj-quality calls | 5.5% | 94.5% |
-| surviving haploid calls that are hom-var | 1,017,790 / 1,017,790 | 11,719,615 / 11,719,615 |
-| end-to-end XY output | 405 / 405 hom-hom | 708,336 / 708,336 hom-hom (7,235 pairs) |
-| end-to-end XX output, same region | 3,072 het-het | 0 pairs |
-
-The chrY window includes ampliconic/palindromic MSY with known mapping problems, which
-inflates the het rate; treat 94.7% as specific to that window, not a clean chrY estimate.
-Either way, chrY discards nearly all quality calls as artifact hets and should not be
-released without a decision on hemizygous modelling.
-
-Validation scope: ploidy handling and bucket assignment are measured on both chromosomes
-as above. No MNV-level accuracy check (are the emitted pairs real, is cis correct) has
-been run off the autosomes — the source paper used autosomes.
+No MNV-level accuracy check (are the emitted pairs real, is cis correct) has been run
+off the autosomes — the source paper used autosomes.
 
 ### Key functions
 
 | Function | Location | Purpose |
 |----------|----------|---------|
 | `_is_nonref(e)` | Expression helper | Check `is_defined(LGT) & is_non_ref()` |
+| `_carries_snv(e)` | Expression helper | Gate into the scan window: entry has ≥1 SNV alt |
 | `_get_carried_alts(entry)` | Expression helper | Array of `{locus, alleles, is_hom, hap}`, one per carried **SNV** alt (ploidy-safe) |
 | `_classify_alt_pair(ca, pa, same_phase_set)` | Expression helper | Return `{is_hethet, is_homhom, is_hethom}` |
-| `_scan_for_candidates(ht, max_distance)` | Pipeline step | `hl.scan.fold` sliding window |
-| `_classify_mnv_pairs(ht)` | Pipeline step | Classify + checkpoint + explode |
+| `_scan_for_candidates(ht, max_distance)` | Pipeline step | `hl.scan.fold` sliding window; narrows to candidate carriers and checkpoints |
+| `_classify_mnv_pairs(ht)` | Pipeline step | Explode carriers + classify alt pairs |
 | `_aggregate_mnv_pairs(ht)` | Pipeline step | group_by + aggregate counts |
 | `discover_mnv(vds, ...)` | Top-level | Orchestrates scan → classify → aggregate |
 
@@ -186,8 +179,10 @@ Reads the discovery HT and joins:
 
 ### Function
 
-`annotate_mnv(mnv_ht, release_ht)` — joins frequency and VEP using the given release
-table, returns annotated Table.
+`annotate_mnv(mnv_ht, release_ht, vep_ht)` — joins frequency and VEP from the given
+tables, returns annotated Table. Both are read in `main` and passed in. Fields are
+missing for SNVs absent from the release (missing `filters` ≠ PASS; PASS is an empty
+set).
 
 ---
 
@@ -321,7 +316,7 @@ intervening variant at P+1 caused `_prev_nonnull` to return P+1 instead of P.
 | Splitting | `hl.split_multi_hts` | None (works in local allele space) |
 | Phasing check | `GT.phased` + `GT == prev_GT` | `LPGT.phased` + PID match + phase orientation |
 | Resources | `gnomad_hail` | `gnomad_methods` + `gnomad_qc` |
-| Hail version | 0.2.11 | 0.2.134+ |
+| Hail version | 0.2.11 | 0.2.128+ |
 | Processing | Per-chromosome | Whole-genome (or per-interval for testing) |
 
 ---
