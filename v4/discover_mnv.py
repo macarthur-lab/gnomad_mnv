@@ -35,6 +35,7 @@ Usage::
 import argparse
 import logging
 import time
+from typing import List, Optional, Tuple
 
 import hail as hl
 from gnomad.resources.grch38.gnomad import public_release
@@ -110,11 +111,11 @@ def _carries_snv(entry: hl.expr.StructExpression) -> hl.expr.BooleanExpression:
     Check if an entry carries at least one SNV alt, i.e. can form an MNV pair.
 
     Decides whether an entry enters the scan window. :func:`_is_nonref` isn't
-    enough because a site can carry both SNV and indel alts and a sample may carry only the
-    indel — non-ref, yet its ``_alts`` is empty because :func:`_get_carried_alts`
-    keeps SNV alts only. Such an entry can never yield an output pair
-    (classification keeps SNP-SNP pairs only), so excluding it here prevents
-    bloating the window state, the ``prev`` arrays, and the checkpoint.
+    enough because a site can carry both SNV and indel alts and a sample may
+    carry only the indel — non-ref, yet its ``_alts`` is empty because
+    :func:`_get_carried_alts` keeps SNV alts only. Such an entry can never yield
+    an output pair (classification keeps SNP-SNP pairs only), so excluding it here
+    prevents bloating the window state, the ``prev`` arrays, and the checkpoint.
 
     :param entry: Entry expression with the ``_alts`` field built by
         :func:`_get_carried_alts` (missing for ref entries).
@@ -129,7 +130,7 @@ def _get_carried_alts(entry: hl.expr.StructExpression) -> hl.expr.ArrayExpressio
 
     An array (not one struct) so het_non_ref (``1/2``) contributes both alts;
     het-ref/hom-var yield one. Alleles are min-repped so output keys join the
-    split/min-repped release HT — a raw multiallelic alt (e.g.
+    split/min-repped release Table — a raw multiallelic alt (e.g.
     ``["TCCGGG","GCCGGG"]``) would miss the join. Built at localization, not per
     pair, so the row ``alleles`` array isn't carried through the scan window on
     every sample's entry.
@@ -331,7 +332,7 @@ def _classify_mnv_pairs(ht: hl.Table) -> hl.Table:
 
     def _build_pair_record(entry, prev_tuple, current_alt, prev_alt):
         # Loci/alleles come from the (min-repped) carried-alt records, not the
-        # scan's site locus, so output keys join the release HT.
+        # scan's site locus, so output keys join the release Table.
         prev_e = prev_tuple[1]
         return hl.bind(
             lambda gt_class: hl.struct(
@@ -422,7 +423,7 @@ def _aggregate_mnv_pairs(ht: hl.Table) -> hl.Table:
     )
 
 
-def _parse_intervals(values: list[str]) -> list[tuple[str, str]]:
+def _parse_intervals(values: List[str]) -> List[Tuple[str, str]]:
     """
     Parse ``--intervals`` values into (gene_name, interval) pairs.
 
@@ -457,7 +458,11 @@ def _normalize_chrom(value: str) -> str:
         already-prefixed contig name (e.g. ``"chr21"``).
     :return: GRCh38 contig name, e.g. ``"chr21"`` or ``"chrX"``.
     """
-    return value if value.lower().startswith("chr") else f"chr{value}"
+    # Strip any chr/CHR prefix, then rebuild: GRCh38 contigs are exact-case, so
+    # the letter chromosomes must be uppercased (``x`` -> ``chrX``); digits are
+    # left as-is.
+    body = value[3:] if value.lower().startswith("chr") else value
+    return f"chr{body if body.isdigit() else body.upper()}"
 
 
 def _per_alt_af(mt: hl.MatrixTable, release_ht: hl.Table) -> hl.Table:
@@ -466,14 +471,14 @@ def _per_alt_af(mt: hl.MatrixTable, release_ht: hl.Table) -> hl.Table:
     is the release AF of global alt ``g``.
 
     :param mt: MatrixTable keyed by ``(locus, alleles)``.
-    :param release_ht: Split release HT keyed by ``(locus, alleles)``; ``freq[0].AF``
+    :param release_ht: Split release Table keyed by ``(locus, alleles)``; ``freq[0].AF``
         is the adj AF.
     :return: Table keyed by ``(locus, alleles)`` with an ``_alt_af`` array.
     """
     r = mt.rows().select()
     r = r.annotate(_ai=hl.range(1, hl.len(r.alleles)))
     r = r.explode("_ai")
-    # min-rep so the key matches the min-repped release HT (else AF missing).
+    # min-rep so the key matches the min-repped release Table (else AF missing).
     r = r.annotate(_mr=hl.min_rep(r.locus, hl.array([r.alleles[0], r.alleles[r._ai]])))
     r = r.annotate(_af=release_ht[r._mr.locus, r._mr.alleles].freq[0].AF)
     return r.group_by(r.locus, r.alleles).aggregate(
@@ -488,7 +493,7 @@ def _drop_all_lowqual_sites(mt: hl.MatrixTable) -> hl.MatrixTable:
     Drop sites where every alt is AS_lowqual — release-excluded, can't be a
     real MNV, and dropping them shrinks the table fed to the scan.
 
-    The unsplit info HT (``AS_lowqual`` is ``array<bool>`` over alts) is re-read
+    The unsplit info Table (``AS_lowqual`` is ``array<bool>`` over alts) is re-read
     with the variant_data's partition intervals so the join needs no shuffle.
 
     .. note::
@@ -496,8 +501,9 @@ def _drop_all_lowqual_sites(mt: hl.MatrixTable) -> hl.MatrixTable:
         This is deliberately site-level, not per-alt: at a mixed site, a lowqual
         SNP alt still enters the scan and can be emitted as a pair. Discovery
         stays a superset of the release; such pairs surface downstream with
-        missing release annotations (see :func:`annotate_mnv`) and can be
-        filtered there.
+        missing release annotations (see :func:`annotate_mnv`). The pipeline
+        retains them by design — a downstream consumer of the output table is
+        responsible for dropping them if needed.
 
     :param mt: MatrixTable of variant data keyed by ``(locus, alleles)``.
     :return: ``mt`` with all-AS_lowqual sites removed.
@@ -520,16 +526,17 @@ def discover_mnv(
     vds: hl.vds.VariantDataset,
     release_ht: hl.Table,
     max_distance: int = MAX_MNV_DISTANCE,
-    entries_to_keep: list[str] = MNV_ENTRIES_TO_KEEP,
-    classify_n_partitions: int | None = None,
+    entries_to_keep: List[str] = MNV_ENTRIES_TO_KEEP,
+    classify_n_partitions: Optional[int] = None,
 ) -> hl.Table:
     """
     Run single-pass MNV discovery on an unsplit VDS.
 
-    Stays in local allele space (LGT/LPGT/LA/PID). Pipeline: drop all-lowqual sites →
-    adjust genotypes (het_non_ref flag → hom-alt hotfix → sex ploidy → adj,
-    gnomAD QC's order) → localize → build ``_alts`` → :func:`_scan_for_candidates` →
-    :func:`_classify_mnv_pairs` → :func:`_aggregate_mnv_pairs`.
+    Stays in local allele space (LGT/LPGT/LA/PID). Pipeline: drop all-lowqual
+    sites → adjust genotypes (het_non_ref flag → hom-alt hotfix → sex ploidy →
+    adj, gnomAD QC's order) → localize → build ``_alts`` →
+    :func:`_scan_for_candidates` → :func:`_classify_mnv_pairs` →
+    :func:`_aggregate_mnv_pairs`.
 
     .. note::
 
@@ -544,7 +551,7 @@ def discover_mnv(
         PAR-boundary case.
 
     :param vds: Unsplit gnomAD v4 VariantDataset.
-    :param release_ht: Release sites HT supplying the per-alt AF the hom-alt
+    :param release_ht: Release sites Table supplying the per-alt AF the hom-alt
         depletion hotfix compares against.
     :param max_distance: Max bp between the two SNVs. Default 2 (codon frame).
     :param entries_to_keep: Entry fields to keep (global/post-split names).
@@ -645,17 +652,17 @@ def annotate_mnv(mnv_ht: hl.Table, release_ht: hl.Table, vep_ht: hl.Table) -> hl
 
         Discovery runs on the (optionally filtered) VDS, not on release
         variants, so a discovered SNV can be absent from the release entirely —
-        e.g. carried only by non-release samples, AC=0 after adj, or AS_lowqual
-        at a mixed site. For those rows ``filters``/AC/AF/``vep`` come back
-        missing. Missing ``filters`` is not PASS — PASS is an *empty set* — so
-        distinguish not-in-release (missing) from passing (empty) when consuming
-        this table.
+        e.g. carried only by non-release samples, or AS_lowqual at a mixed site.
+        (A variant with adj AC=0 is *present*, flagged ``AC0``, not missing.)
+        For those rows ``filters``/AC/AF/``vep`` come back missing. Missing
+        ``filters`` is not PASS — PASS is an *empty set* — so distinguish
+        not-in-release (missing) from passing (empty) when consuming this table.
 
     :param mnv_ht: MNV Hail Table output from :func:`discover_mnv`.
-    :param release_ht: Release sites HT supplying AC/AF/filters for both SNVs. Within
+    :param release_ht: Release sites Table supplying AC/AF/filters for both SNVs. Within
         one invocation this is the same table :func:`discover_mnv` is given, so the
         hotfix AF and the reported frequencies come from one release.
-    :param vep_ht: VEP HT supplying transcript consequences for both SNVs.
+    :param vep_ht: VEP Table supplying transcript consequences for both SNVs.
     :return: MNV Table with AC, AF, filters, and VEP for both SNVs.
     """
     snv2_data = release_ht[mnv_ht.locus, mnv_ht.alleles]
@@ -752,9 +759,9 @@ def main(args: argparse.Namespace) -> None:
 
         # Guard: ``hl.min_rep`` can shift a SNP's locus when it sits inside a
         # padded multi-allelic ref, moving it outside the site-locus pairing
-        # window. Read back the written (small, aggregated) HT and flag any
+        # window. Read back the written (small, aggregated) Table and flag any
         # emitted pair whose distance is outside [1, max_distance]. Write those
-        # rows to a sibling HT so they can be triaged later (see
+        # rows to a sibling Table so they can be triaged later (see
         # v4/KNOWN_ISSUES.md); they are NOT dropped from the discovery output.
         # Written even when empty, so a clean rerun replaces any stale outliers
         # table from a previous run at the same path.
@@ -818,14 +825,14 @@ if __name__ == "__main__":
     )
     step_args.add_argument(
         "--discover",
-        help="Run MNV discovery and write the raw pair counts HT.",
+        help="Run MNV discovery and write the raw pair counts Table.",
         action="store_true",
     )
     step_args.add_argument(
         "--annotate",
         help=(
-            "Annotate the discovery HT with AC, AF, filters (exomes release)"
-            " and VEP consequences (v4 exomes), then write the annotated HT."
+            "Annotate the discovery Table with AC, AF, filters (exomes release)"
+            " and VEP consequences (v4 exomes), then write the annotated Table."
         ),
         action="store_true",
     )
@@ -920,8 +927,8 @@ if __name__ == "__main__":
         "--classify-n-partitions",
         help=(
             "If set, repartition to this many partitions before classification."
-            " Requires --intervals: it shuffles the fully-widened table,"
-            " too costly for a full-cohort run. Pass it (e.g."
+            " Requires --intervals: the shuffle is a deliberate gene-scale-only"
+            " knob, untested on --chr or full-cohort runs. Pass it (e.g."
             f" {CLASSIFY_N_PARTITIONS}) if an --intervals run hits a Hail off-heap"
             " memory error during classification."
         ),
@@ -939,8 +946,8 @@ if __name__ == "__main__":
         )
     if args.classify_n_partitions is not None and args.intervals is None:
         parser.error(
-            "--classify-n-partitions requires --intervals: the repartition"
-            " shuffles the fully-widened table, too costly for --chr or"
-            " full-cohort runs."
+            "--classify-n-partitions requires --intervals: the classification"
+            " shuffle is a gene-scale-only knob, untested on --chr or full-cohort"
+            " runs."
         )
     main(args)
