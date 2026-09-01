@@ -190,37 +190,12 @@ After `hl.experimental.sparse_split_multi()`:
 | `v4/resources.py` | Resource paths, `get_gnomad_v4_vds()`, TableResource definitions |
 | `v4/discover_mnv.py` | MNV discovery (scan-based) and annotation |
 
-### Pipeline Steps
+### Pipeline Steps, Algorithm, Output Schema
 
-`--discover` uses a single-pass architecture with `hl.scan.fold` + `hl.case()` branching:
-
-1. **Localize + scan**: `unfilter_entries()` → `_localize_entries` → annotate entries
-   with row alleles → `hl.scan.array_agg` + `hl.scan.fold` with `hl.case()` branching
-   to track a window of recent non-ref `(locus, entry)` tuples per sample. Window uses
-   missing state (not empty array) to distinguish "no data" from "no nearby variants".
-   Filter to rows where any sample has a candidate MNV pair.
-2. **Classify**: For each candidate, use LGT/LPGT directly (valid in local allele space)
-   for het-het / hom-hom / het-hom classification. Extract biallelic alleles via
-   `entry.LA[max(LGT[0], LGT[1])]` indexing into the stored `_alleles`. Filter to pairs
-   where both carried alleles are SNPs.
-3. **Aggregate**: Checkpoint → explode → `group_by(locus, alleles, prev_locus,
-   prev_alleles)` → aggregate n_hethet, n_homhom, n_hethom, n_total.
-
-No `sparse_split_multi` or unlocalize step is needed — biallelic alleles are extracted
-inline via LA indexing, and LGT/LPGT classification is valid in local allele space.
-
-`--annotate`: Read discovery HT → join AC/AF/filters from `public_release("exomes")` +
-VEP from `get_vep("exomes")` → write annotated HT.
-
-The fold-based scan tracks an array (window) of recent non-ref values per sample, pruned
-by distance and contig each row. This catches all pairs within `--max-distance` bp,
-including the (P, P+2) edge case when P+1 is also non-ref.
-
-### Output Paths
-
-- Discovery: `gs://gnomad/v4.1/mnv/exomes/gnomad.exomes.v4.1.mnv_discovery.ht`
-- Annotated: `gs://gnomad/v4.1/mnv/exomes/gnomad.exomes.v4.1.mnv_annotated.ht`
-- Test: `gs://gnomad-tmp/gnomad_v4.1_testing/mnv/exomes/...`
+See [`v4/DOCUMENTATION.md`](v4/DOCUMENTATION.md) for the discovery/annotation steps,
+scan algorithm, classification rules, output schema, and output paths. See
+[`v4/KNOWN_ISSUES.md`](v4/KNOWN_ISSUES.md) for the min-rep locus-shift edge case and the
+het-hom cis assumption for hemizygous pairs.
 
 ### Dataproc Submission
 
