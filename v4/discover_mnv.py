@@ -572,10 +572,12 @@ def discover_mnv(
     :param entries_to_keep: Entry fields to keep (global/post-split names).
     :param classify_n_partitions: If set, repartition before classification.
         Only pass at ``--intervals`` scale — see the CLI help for why.
+    :param filter_intervals: Locus intervals a gene-interval run was scoped to, so the info Table join stays within them (see :func:`_drop_all_lowqual_sites`).
+        Default is None.
     :return: Hail Table of MNV pairs with per-pair counts.
     """
     mt = vds.variant_data
-    mt = _drop_all_lowqual_sites(mt)
+    mt = _drop_all_lowqual_sites(mt, filter_intervals)
     mt = mt.filter_rows(hl.any(lambda a: hl.is_snp(mt.alleles[0], a), mt.alleles[1:]))
 
     # entries_to_keep uses global names; L-prefix the ones the split remaps.
