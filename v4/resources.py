@@ -1,6 +1,6 @@
 """Resource paths and data loading utilities for gnomAD v4 MNV discovery."""
 
-from typing import List, Optional, Union
+from typing import List, Optional, Tuple, Union
 
 import hail as hl
 from gnomad.resources.resource_utils import TableResource, VariantDatasetResource
@@ -22,6 +22,76 @@ Written by ``gnomad_qc.v4.split_ukb_vds`` from
 ``get_gnomad_v4_vds(remove_hard_filtered_samples=False)`` filtered to the columns
 whose sample ID (``s``) starts with ``"UKB"``.
 """
+
+AUTOSOME_TEST_GENES = {
+    "AHNAK2": ("chr14", 104937244, 104978374),
+    "ANO5": ("chr11", 21782659, 22283567),
+    "CAPN3": ("chr15", 42359498, 42412949),
+    "DYSF": ("chr2", 71453561, 71686763),
+    "SGCA": ("chr17", 50164214, 50175928),
+}
+"""Autosomal test genes as GRCh38 ``(contig, start, end)`` gene spans.
+
+The five genes the variant co-occurrence exome pipeline is tested on; the spans
+match ``TEST_INTERVALS`` in gnomad_chets ``v4/resources.py`` (GENCODE gene spans
+from the gnomAD browser).
+"""
+
+SEX_CHR_TEST_GENES = {
+    # PAR1: diploid in XY samples.
+    "SHOX": ("chrX", 624344, 659411),
+    # Straddles the PAR1 boundary (PAR1 ends at chrX:2781479), so XY samples
+    # switch from diploid to hemizygous within the gene.
+    "XG": ("chrX", 2752040, 2816500),
+    # Non-PAR X: hemizygous in XY samples.
+    "EMD": ("chrX", 154379273, 154381574),
+    # Y: haploid in XY samples, missing in XX samples.
+    "DDX3Y": ("chrY", 12904108, 12920478),
+}
+"""Sex-chromosome test genes as GRCh38 ``(contig, start, end)`` gene spans.
+
+One gene per ploidy case, plus one across the PAR1 boundary (GENCODE gene spans
+from the gnomAD browser).
+"""
+
+TEST_GENE_SETS = {
+    "default": {"SGCA": AUTOSOME_TEST_GENES["SGCA"]},
+    "autosomes": AUTOSOME_TEST_GENES,
+    "sex_chr": SEX_CHR_TEST_GENES,
+    "all": {**AUTOSOME_TEST_GENES, **SEX_CHR_TEST_GENES},
+}
+"""Named test gene sets selectable with ``--test-genes``.
+
+``"default"`` is SGCA, at 11.7 kb the smallest of the autosomal test genes, so a
+default run is quick. It's also what ``--intervals`` uses when given no values.
+"""
+
+TEST_GENE_PADDING = 100
+"""bp added to each side of a test gene's span when building its interval.
+
+Wider than the largest pair distance, so pairs at a gene's edges aren't cut off,
+but close enough to the gene that the region still matches the variant
+co-occurrence test intervals.
+"""
+
+
+def get_test_gene_intervals(
+    gene_set: str, padding: int = TEST_GENE_PADDING
+) -> List[Tuple[str, str]]:
+    """
+    Get the padded (gene_name, interval) pairs for a named test gene set.
+
+    :param gene_set: Key of :data:`TEST_GENE_SETS`: ``"default"``,
+        ``"autosomes"``, ``"sex_chr"`` or ``"all"``.
+    :param padding: bp added to each side of every gene span. Default is
+        :data:`TEST_GENE_PADDING`.
+    :return: List of (gene_name, interval) tuples, e.g.
+        ``("SGCA", "chr17:50164114-50176028")``.
+    """
+    return [
+        (name, f"{contig}:{max(start - padding, 1)}-{end + padding}")
+        for name, (contig, start, end) in TEST_GENE_SETS[gene_set].items()
+    ]
 
 
 def _mnv_root_path(
@@ -75,8 +145,8 @@ def get_discovered_mnvs(
     :param data_type: Data type, either ``"exomes"`` or ``"genomes"``. Default is
         ``"exomes"``.
     :param interval_names: Optional labels (gene names) for the intervals the run
-        was scoped to via ``--intervals``. Appended to the output filename so runs
-        over different intervals don't overwrite each other.
+        was scoped to via ``--intervals`` or ``--test-genes``. Appended to the
+        output filename so runs over different intervals don't overwrite each other.
     :param ukb_only: Whether the run used the UKB-only VDS subset. Adds a
         ``.ukb_only`` filename component so UKB output doesn't overwrite
         full-cohort output. Default is False.
@@ -123,8 +193,8 @@ def get_annotated_mnvs(
     :param data_type: Data type, either ``"exomes"`` or ``"genomes"``. Default is
         ``"exomes"``.
     :param interval_names: Optional labels (gene names) for the intervals the run
-        was scoped to via ``--intervals``. Appended to the output filename so runs
-        over different intervals don't overwrite each other.
+        was scoped to via ``--intervals`` or ``--test-genes``. Appended to the
+        output filename so runs over different intervals don't overwrite each other.
     :param ukb_only: Whether the run used the UKB-only VDS subset. Adds a
         ``.ukb_only`` filename component so UKB output doesn't overwrite
         full-cohort output. Default is False.
