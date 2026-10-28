@@ -488,13 +488,19 @@ def _per_alt_af(mt: hl.MatrixTable, release_ht: hl.Table) -> hl.Table:
     )
 
 
-def _drop_all_lowqual_sites(mt: hl.MatrixTable) -> hl.MatrixTable:
+def _drop_all_lowqual_sites(
+    mt: hl.MatrixTable,
+    filter_intervals: Optional[List[hl.expr.IntervalExpression]] = None,
+) -> hl.MatrixTable:
     """
     Drop sites where every alt is AS_lowqual — release-excluded, can't be a
     real MNV, and dropping them shrinks the table fed to the scan.
 
     The unsplit info Table (``AS_lowqual`` is ``array<bool>`` over alts) is re-read
-    with the variant_data's partition intervals so the join needs no shuffle.
+    with the variant_data's partition intervals so the join needs no shuffle. For
+    a gene-interval run it is instead filtered to ``filter_intervals``: the
+    partition intervals are contiguous, so one spanning the gap between two genes
+    would read every info row in between (most of the exome for 5 genes).
 
     .. note::
 
@@ -506,10 +512,18 @@ def _drop_all_lowqual_sites(mt: hl.MatrixTable) -> hl.MatrixTable:
         responsible for dropping them if needed.
 
     :param mt: MatrixTable of variant data keyed by ``(locus, alleles)``.
+    :param filter_intervals: Locus intervals a gene-interval run was scoped to.
+        If None, the info Table is read with ``mt``'s partition intervals. Default
+        is None.
     :return: ``mt`` with all-AS_lowqual sites removed.
     """
-    intervals = mt._calculate_new_partitions(mt.n_partitions())
-    info_ht = hl.read_table(get_info(split=False).path, _intervals=intervals)
+    if filter_intervals is None:
+        intervals = mt._calculate_new_partitions(mt.n_partitions())
+        info_ht = hl.read_table(get_info(split=False).path, _intervals=intervals)
+    else:
+        info_ht = hl.filter_intervals(
+            hl.read_table(get_info(split=False).path), filter_intervals
+        )
     info_ht = info_ht.select(_all_lowqual=hl.all(info_ht.AS_lowqual))
     mt = mt.annotate_rows(
         _all_lowqual=hl.coalesce(info_ht[mt.row_key]._all_lowqual, False)
@@ -528,6 +542,7 @@ def discover_mnv(
     max_distance: int = MAX_MNV_DISTANCE,
     entries_to_keep: List[str] = MNV_ENTRIES_TO_KEEP,
     classify_n_partitions: Optional[int] = None,
+    filter_intervals: Optional[List[hl.expr.IntervalExpression]] = None,
 ) -> hl.Table:
     """
     Run single-pass MNV discovery on an unsplit VDS.
@@ -572,7 +587,11 @@ def discover_mnv(
 
     # Row/col inputs the hotfix + sex-ploidy need (per-alt release AF, sex
     # karyotype, and the model flag that exempts samples from the hotfix).
-    af_ht = _per_alt_af(mt, release_ht)
+    # Checkpointed so the scan's passes read it from GCS rather than re-fetching
+    # its shuffle output from executors that preemptible workers may have lost.
+    af_ht = _per_alt_af(mt, release_ht).checkpoint(
+        hl.utils.new_temp_file("mnv_alt_af", "ht")
+    )
     mt = mt.select_rows(_alt_af=af_ht[mt.locus, mt.alleles]._alt_af)
     meta_ht = meta().ht()
     mt = mt.select_cols(
@@ -712,6 +731,16 @@ def main(args: argparse.Namespace) -> None:
 
     release_ht = public_release("exomes").ht()
 
+    # Gene-interval runs: restrict the joined-in tables to the genes. A join reads
+    # the right-hand table over the left's partition ranges, and at gene scale a
+    # range can span the gap between two genes, reading every row in between.
+    gene_intervals = None
+    if gene_names is not None:
+        gene_intervals = [
+            hl.parse_locus_interval(i, reference_genome="GRCh38") for i in intervals
+        ]
+        release_ht = hl.filter_intervals(release_ht, gene_intervals)
+
     if args.discover:
         if chrom is not None:
             logger.info("Starting MNV discovery on chromosome %s...", chrom)
@@ -745,6 +774,7 @@ def main(args: argparse.Namespace) -> None:
             max_distance=args.max_distance,
             entries_to_keep=MNV_ENTRIES_TO_KEEP,
             classify_n_partitions=args.classify_n_partitions,
+            filter_intervals=gene_intervals,
         )
 
         discovery_resource = get_discovered_mnvs(
@@ -798,6 +828,8 @@ def main(args: argparse.Namespace) -> None:
             suffix=args.output_suffix,
         ).ht()
         vep_ht = get_vep(data_type="exomes").ht()
+        if gene_intervals is not None:
+            vep_ht = hl.filter_intervals(vep_ht, gene_intervals)
         mnv_ht = annotate_mnv(mnv_ht, release_ht, vep_ht)
 
         annotated_resource = get_annotated_mnvs(
