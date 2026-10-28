@@ -98,6 +98,7 @@ def _mnv_root_path(
     version: str = CURRENT_VERSION,
     test: bool = False,
     data_type: str = "exomes",
+    test_genes: bool = False,
 ) -> str:
     """Return the root GCS path for MNV resources.
 
@@ -105,12 +106,15 @@ def _mnv_root_path(
     :param test: Whether to use the testing output bucket. Default is False.
     :param data_type: Data type, either ``"exomes"`` or ``"genomes"``. Default is
         ``"exomes"``.
+    :param test_genes: Whether to use the ``test_genes/`` folder under the
+        production path. Ignored when ``test`` is True. Default is False.
     :return: Root GCS path string.
     """
     return (
         f"gs://gnomad-tmp/gnomad_v{version}_testing/mnv/{data_type}"
         if test
         else f"gs://gnomad/v{version}/mnv/{data_type}"
+        f"{'/test_genes' if test_genes else ''}"
     )
 
 
@@ -134,6 +138,7 @@ def get_discovered_mnvs(
     ukb_only: bool = False,
     chrom: Optional[str] = None,
     suffix: Optional[str] = None,
+    test_genes: bool = False,
 ) -> TableResource:
     """Get the MNV discovery TableResource.
 
@@ -155,6 +160,10 @@ def get_discovered_mnvs(
         written to a distinct path. Default is None.
     :param suffix: Optional free-form filename suffix (e.g. a username) appended
         last, so a run doesn't overwrite anyone else's output. Default is None.
+    :param test_genes: Whether the run used one of the larger named test gene sets
+        (``--test-genes`` other than ``"default"``). Writes to a ``test_genes/``
+        folder under the production path, so the output persists without mixing
+        with full-run output. Ignored when ``test`` is True. Default is False.
     :return: TableResource for MNV discovery output.
     """
     if chrom and interval_names:
@@ -164,7 +173,7 @@ def get_discovered_mnvs(
 
     return TableResource(
         path=(
-            f"{_mnv_root_path(version, test, data_type)}"
+            f"{_mnv_root_path(version, test, data_type, test_genes)}"
             f"/gnomad.{data_type}.v{version}.mnv_discovery"
             f"{'.ukb_only' if ukb_only else ''}"
             f"{'.' + chrom if chrom else ''}"
@@ -182,6 +191,7 @@ def get_annotated_mnvs(
     ukb_only: bool = False,
     chrom: Optional[str] = None,
     suffix: Optional[str] = None,
+    test_genes: bool = False,
 ) -> TableResource:
     """Get the annotated MNV TableResource.
 
@@ -203,6 +213,10 @@ def get_annotated_mnvs(
         written to a distinct path. Default is None.
     :param suffix: Optional free-form filename suffix (e.g. a username) appended
         last, so a run doesn't overwrite anyone else's output. Default is None.
+    :param test_genes: Whether the run used one of the larger named test gene sets
+        (``--test-genes`` other than ``"default"``). Writes to a ``test_genes/``
+        folder under the production path, so the output persists without mixing
+        with full-run output. Ignored when ``test`` is True. Default is False.
     :return: TableResource for annotated MNV output.
     """
     if chrom and interval_names:
@@ -212,7 +226,7 @@ def get_annotated_mnvs(
 
     return TableResource(
         path=(
-            f"{_mnv_root_path(version, test, data_type)}"
+            f"{_mnv_root_path(version, test, data_type, test_genes)}"
             f"/gnomad.{data_type}.v{version}.mnv_annotated"
             f"{'.ukb_only' if ukb_only else ''}"
             f"{'.' + chrom if chrom else ''}"

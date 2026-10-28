@@ -54,7 +54,8 @@ hailctl dataproc submit <CLUSTER> v4/discover_mnv.py \
   --pyfiles /tmp/pyfiles.zip \
   -- --discover --annotate --intervals SGCA=chr17:50164114-50176028 --overwrite
 
-# Named test gene set: autosomes, sex_chr or all (--test-genes implies --test).
+# Named test gene set: default, autosomes, sex_chr or all. default writes to the
+# test bucket; the larger sets write to gs://gnomad/v4.1/mnv/exomes/test_genes/.
 hailctl dataproc submit <CLUSTER> v4/discover_mnv.py \
   --pyfiles /tmp/pyfiles.zip \
   -- --discover --annotate --test-genes all --overwrite
@@ -74,7 +75,7 @@ CLI arguments:
 | `--annotate` | Run frequency + VEP annotation |
 | `--test` | Write output to the test bucket instead of production. **Does not subset intervals** — on its own this is a full-cohort, genome-wide run |
 | `--intervals GENE=INTERVAL ...` | Subset discovery to one or more gene intervals. Implies `--test`. With no values, uses the `default` test gene set: `SGCA=chr17:50164114-50176028` (padded by 100 bp). Mutually exclusive with `--chr` and `--test-genes` |
-| `--test-genes {default,autosomes,sex_chr,all}` | Subset discovery to a named test gene set, each gene padded by 100 bp: `default` (SGCA, the smallest autosomal test gene), `autosomes` (AHNAK2, ANO5, CAPN3, DYSF, SGCA, the variant co-occurrence test genes), `sex_chr` (SHOX in PAR1, XG across the PAR1 boundary, EMD on non-PAR X, DDX3Y on Y), or `all`. Implies `--test`. Mutually exclusive with `--chr` and `--intervals` |
+| `--test-genes {default,autosomes,sex_chr,all}` | Subset discovery to a named test gene set, each gene padded by 100 bp: `default` (SGCA, the smallest autosomal test gene), `autosomes` (AHNAK2, ANO5, CAPN3, DYSF, SGCA, the variant co-occurrence test genes), `sex_chr` (SHOX in PAR1, XG across the PAR1 boundary, EMD on non-PAR X, DDX3Y on Y), or `all`. `default` writes to the test bucket like `--intervals`; the larger sets write to a `test_genes/` folder under the production path, unless `--test` is given. Mutually exclusive with `--chr` and `--intervals` |
 | `--chr N` | Run on a single whole chromosome (e.g. `--chr 21`, `--chr X`); writes to the production bucket. Mutually exclusive with `--intervals` and `--test-genes` |
 | `--ukb-only` | Use the UKB-only VDS subset; adds `.ukb_only` to the output path |
 | `--output-suffix S` | Free-form suffix appended last to the output path, so runs don't overwrite each other |
@@ -256,6 +257,12 @@ set).
 |----------|-----------------|-----------|
 | Discovery | `gs://gnomad/v4.1/mnv/exomes/gnomad.exomes.v4.1.mnv_discovery.ht` | `gs://gnomad-tmp/gnomad_v4.1_testing/mnv/exomes/...` |
 | Annotated | `gs://gnomad/v4.1/mnv/exomes/gnomad.exomes.v4.1.mnv_annotated.ht` | `gs://gnomad-tmp/gnomad_v4.1_testing/mnv/exomes/...` |
+
+Gene-interval runs add the gene names to the filename (e.g.
+`...mnv_discovery.SHOX_XG_EMD_DDX3Y.ht`). `--intervals` and `--test-genes default`
+write to the test path. `--test-genes autosomes`, `sex_chr` and `all` take long
+enough that they write to `gs://gnomad/v4.1/mnv/exomes/test_genes/` instead, so the
+output outlasts the test bucket's cleanup; add `--test` to send them to the test path.
 
 ---
 

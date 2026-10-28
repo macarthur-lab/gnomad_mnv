@@ -730,8 +730,11 @@ def main(args: argparse.Namespace) -> None:
         gene_names = [name for name, _ in parsed]
         intervals = [interval for _, interval in parsed]
 
-    # A gene-interval subset is always a test run.
-    test_enabled = args.test or gene_names is not None
+    # A gene-interval subset is a test run, except the larger named test gene sets:
+    # they take long enough that their output goes to a test_genes/ folder under
+    # the production path instead of the temporary test bucket (unless --test).
+    test_genes = args.test_genes not in (None, "default")
+    test_enabled = args.test or (gene_names is not None and not test_genes)
 
     release_ht = public_release("exomes").ht()
 
@@ -760,6 +763,8 @@ def main(args: argparse.Namespace) -> None:
             logger.info("Starting MNV discovery.")
         if test_enabled:
             logger.info("Writing output to the test bucket.")
+        elif test_genes:
+            logger.info("Writing output to the test_genes/ production folder.")
         if args.ukb_only:
             logger.info("Using the UKB-only VDS subset.")
         start = time.time()
@@ -788,6 +793,7 @@ def main(args: argparse.Namespace) -> None:
             ukb_only=args.ukb_only,
             chrom=chrom,
             suffix=args.output_suffix,
+            test_genes=test_genes,
         )
         logger.info("Writing MNV discovery results to %s.", discovery_resource.path)
         mnv_ht.write(discovery_resource.path, overwrite=args.overwrite)
@@ -831,6 +837,7 @@ def main(args: argparse.Namespace) -> None:
             ukb_only=args.ukb_only,
             chrom=chrom,
             suffix=args.output_suffix,
+            test_genes=test_genes,
         ).ht()
         vep_ht = get_vep(data_type="exomes").ht()
         if gene_intervals is not None:
@@ -843,6 +850,7 @@ def main(args: argparse.Namespace) -> None:
             ukb_only=args.ukb_only,
             chrom=chrom,
             suffix=args.output_suffix,
+            test_genes=test_genes,
         )
         logger.info("Writing annotated MNV results to %s.", annotated_resource.path)
         mnv_ht.write(annotated_resource.path, overwrite=args.overwrite)
@@ -915,9 +923,11 @@ if __name__ == "__main__":
         "--test-genes",
         help=(
             "Subset discovery to a named set of padded test genes, defined in"
-            " TEST_GENE_SETS in v4/resources.py. Like --intervals, implies --test"
-            " and appends the gene names to output paths. Cannot be combined with"
-            " --intervals or --chr."
+            " TEST_GENE_SETS in v4/resources.py. Appends the gene names to output"
+            " paths. 'default' writes to the test bucket like --intervals; the"
+            " larger sets take long enough to run that they write to a test_genes/"
+            " folder under the production path, unless --test is given. Cannot be"
+            " combined with --intervals or --chr."
         ),
         choices=list(TEST_GENE_SETS),
         default=None,
