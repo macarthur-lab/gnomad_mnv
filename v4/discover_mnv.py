@@ -28,6 +28,7 @@ Usage::
     python -m v4.discover_mnv --discover --annotate --test
     python -m v4.discover_mnv --discover --annotate --intervals \\
         PCSK9=chr1:55039447-55064852 PCNT=chr21:46324141-46445769
+    python -m v4.discover_mnv --discover --annotate --test-genes sex_chr
     python -m v4.discover_mnv --discover --chr 21 --overwrite
     python -m v4.discover_mnv --discover --ukb-only --overwrite
 """
@@ -46,10 +47,12 @@ from gnomad_qc.v4.resources.meta import meta
 
 from v4.resources import (
     MNV_ENTRIES_TO_KEEP,
+    TEST_GENE_SETS,
     get_annotated_mnvs,
     get_discovered_mnvs,
     get_gnomad_v4_ukb_vds,
     get_gnomad_v4_vds,
+    get_test_gene_intervals,
 )
 
 logging.basicConfig(
@@ -80,15 +83,6 @@ CLASSIFY_N_PARTITIONS = 500
 """Suggested value for ``--classify-n-partitions`` when needed (the CLI arg
 defaults to None/off): a reasonable starting point if a classification-step
 off-heap OOM needs relieving."""
-
-DEFAULT_TEST_GENES = [
-    # PCNT on GRCh38.
-    ("PCNT", "chr21:46324141-46445769"),
-]
-"""Default gene(s)/interval(s) used when ``--intervals`` is given with no values."""
-
-DEFAULT_TEST_GENES_STR = " ".join(f"{n}={i}" for n, i in DEFAULT_TEST_GENES)
-"""CLI-help rendering of :data:`DEFAULT_TEST_GENES`."""
 
 
 # ---------------------------------------------------------------------------
@@ -571,7 +565,8 @@ def discover_mnv(
     :param max_distance: Max bp between the two SNVs. Default 2 (codon frame).
     :param entries_to_keep: Entry fields to keep (global/post-split names).
     :param classify_n_partitions: If set, repartition before classification.
-        Only pass at ``--intervals`` scale — see the CLI help for why.
+        Only pass at gene-interval scale (``--intervals`` or ``--test-genes``);
+        see the CLI help for why.
     :param filter_intervals: Locus intervals a gene-interval run was scoped to,
         so the info Table join stays within them (see :func:`_drop_all_lowqual_sites`).
         Default is None.
@@ -722,15 +717,24 @@ def main(args: argparse.Namespace) -> None:
     if args.chr is not None:
         chrom = _normalize_chrom(args.chr)
         intervals = [chrom]
+    elif args.test_genes is not None:
+        parsed = get_test_gene_intervals(args.test_genes)
+        gene_names = [name for name, _ in parsed]
+        intervals = [interval for _, interval in parsed]
     elif args.intervals is not None:
         parsed = (
-            _parse_intervals(args.intervals) if args.intervals else DEFAULT_TEST_GENES
+            _parse_intervals(args.intervals)
+            if args.intervals
+            else get_test_gene_intervals("default")
         )
         gene_names = [name for name, _ in parsed]
         intervals = [interval for _, interval in parsed]
 
-    # A gene-interval subset is always a test run.
-    test_enabled = args.test or args.intervals is not None
+    # A gene-interval subset is a test run, except the larger named test gene sets:
+    # they take long enough that their output goes to a test_genes/ folder under
+    # the production path instead of the temporary test bucket (unless --test).
+    test_genes = args.test_genes not in (None, "default")
+    test_enabled = args.test or (gene_names is not None and not test_genes)
 
     release_ht = public_release("exomes").ht()
 
@@ -759,6 +763,8 @@ def main(args: argparse.Namespace) -> None:
             logger.info("Starting MNV discovery.")
         if test_enabled:
             logger.info("Writing output to the test bucket.")
+        elif test_genes:
+            logger.info("Writing output to the test_genes/ production folder.")
         if args.ukb_only:
             logger.info("Using the UKB-only VDS subset.")
         start = time.time()
@@ -770,7 +776,8 @@ def main(args: argparse.Namespace) -> None:
             release_only=args.release_only,
         )
 
-        # classify_n_partitions is --intervals-only; the CLI rejects it otherwise.
+        # classify_n_partitions is gene-interval-only (--intervals/--test-genes);
+        # the CLI rejects it otherwise.
         mnv_ht = discover_mnv(
             vds,
             release_ht,
@@ -786,6 +793,7 @@ def main(args: argparse.Namespace) -> None:
             ukb_only=args.ukb_only,
             chrom=chrom,
             suffix=args.output_suffix,
+            test_genes=test_genes,
         )
         logger.info("Writing MNV discovery results to %s.", discovery_resource.path)
         mnv_ht.write(discovery_resource.path, overwrite=args.overwrite)
@@ -829,6 +837,7 @@ def main(args: argparse.Namespace) -> None:
             ukb_only=args.ukb_only,
             chrom=chrom,
             suffix=args.output_suffix,
+            test_genes=test_genes,
         ).ht()
         vep_ht = get_vep(data_type="exomes").ht()
         if gene_intervals is not None:
@@ -841,6 +850,7 @@ def main(args: argparse.Namespace) -> None:
             ukb_only=args.ukb_only,
             chrom=chrom,
             suffix=args.output_suffix,
+            test_genes=test_genes,
         )
         logger.info("Writing annotated MNV results to %s.", annotated_resource.path)
         mnv_ht.write(annotated_resource.path, overwrite=args.overwrite)
@@ -893,20 +903,36 @@ if __name__ == "__main__":
         help="Write output to the test bucket instead of the production bucket.",
         action="store_true",
     )
-    parser.add_argument(
+    # --intervals, --test-genes and --chr each scope which intervals to load;
+    # argparse rejects passing more than one.
+    scope_args = parser.add_mutually_exclusive_group()
+    scope_args.add_argument(
         "--intervals",
         help=(
             "Subset discovery to one or more 'GENE_NAME=INTERVAL' pairs, e.g."
             " 'PCSK9=chr1:55039447-55064852 PCNT=chr21:46324141-46445769'. Implies"
             " --test; gene names are appended to output paths so runs don't"
-            f" overwrite each other. Defaults to {DEFAULT_TEST_GENES_STR} if given"
-            " with no values. Cannot be combined with --chr."
+            " overwrite each other. Uses the 'default' --test-genes set if given"
+            " with no values. Cannot be combined with --chr or --test-genes."
         ),
         nargs="*",
         metavar="GENE_NAME=INTERVAL",
         default=None,
     )
-    parser.add_argument(
+    scope_args.add_argument(
+        "--test-genes",
+        help=(
+            "Subset discovery to a named set of padded test genes, defined in"
+            " TEST_GENE_SETS in v4/resources.py. Appends the gene names to output"
+            " paths. 'default' writes to the test bucket like --intervals; the"
+            " larger sets take long enough to run that they write to a test_genes/"
+            " folder under the production path, unless --test is given. Cannot be"
+            " combined with --intervals or --chr."
+        ),
+        choices=list(TEST_GENE_SETS),
+        default=None,
+    )
+    scope_args.add_argument(
         "--chr",
         help=(
             "Run discovery on a single whole chromosome. Pass a chromosome"
@@ -914,7 +940,7 @@ if __name__ == "__main__":
             " 'chrN' contig name. Output gets a '.<chrom>' suffix so each"
             " chromosome lands at a distinct path (submit one job per chromosome)."
             " Writes to the production bucket unless --test is also given. Cannot"
-            " be combined with --intervals."
+            " be combined with --intervals or --test-genes."
         ),
         type=str,
         metavar="CHROM",
@@ -962,10 +988,10 @@ if __name__ == "__main__":
         "--classify-n-partitions",
         help=(
             "If set, repartition to this many partitions before classification."
-            " Requires --intervals: the shuffle is a deliberate gene-scale-only"
-            " knob, untested on --chr or full-cohort runs. Pass it (e.g."
-            f" {CLASSIFY_N_PARTITIONS}) if an --intervals run hits a Hail off-heap"
-            " memory error during classification."
+            " Requires --intervals or --test-genes: the shuffle is a deliberate"
+            " gene-scale-only knob, untested on --chr or full-cohort runs. Pass it"
+            f" (e.g. {CLASSIFY_N_PARTITIONS}) if a gene-interval run hits a Hail"
+            " off-heap memory error during classification."
         ),
         type=int,
         default=None,
@@ -974,14 +1000,14 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if not args.discover and not args.annotate:
         parser.error("At least one of --discover or --annotate is required.")
-    if args.chr is not None and args.intervals is not None:
+    if (
+        args.classify_n_partitions is not None
+        and args.intervals is None
+        and args.test_genes is None
+    ):
         parser.error(
-            "--chr and --intervals both scope which intervals to load; pass only one."
-        )
-    if args.classify_n_partitions is not None and args.intervals is None:
-        parser.error(
-            "--classify-n-partitions requires --intervals: the classification"
-            " shuffle is a gene-scale-only knob, untested on --chr or full-cohort"
-            " runs."
+            "--classify-n-partitions requires --intervals or --test-genes: the"
+            " classification shuffle is a gene-scale-only knob, untested on --chr or"
+            " full-cohort runs."
         )
     main(args)
