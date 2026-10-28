@@ -572,7 +572,8 @@ def discover_mnv(
     :param entries_to_keep: Entry fields to keep (global/post-split names).
     :param classify_n_partitions: If set, repartition before classification.
         Only pass at ``--intervals`` scale — see the CLI help for why.
-    :param filter_intervals: Locus intervals a gene-interval run was scoped to, so the info Table join stays within them (see :func:`_drop_all_lowqual_sites`).
+    :param filter_intervals: Locus intervals a gene-interval run was scoped to,
+        so the info Table join stays within them (see :func:`_drop_all_lowqual_sites`).
         Default is None.
     :return: Hail Table of MNV pairs with per-pair counts.
     """
@@ -975,8 +976,7 @@ if __name__ == "__main__":
         parser.error("At least one of --discover or --annotate is required.")
     if args.chr is not None and args.intervals is not None:
         parser.error(
-            "--chr and --intervals both scope which intervals to load; pass only"
-            " one."
+            "--chr and --intervals both scope which intervals to load; pass only one."
         )
     if args.classify_n_partitions is not None and args.intervals is None:
         parser.error(
