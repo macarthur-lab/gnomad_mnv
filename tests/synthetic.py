@@ -64,7 +64,8 @@ def make_inputs(
     :param sites: One dict per site with ``locus`` (e.g. ``"chr1:1000"``),
         ``alleles``, ``af`` (release AF per alt), optional ``lowqual`` (AS_lowqual
         per alt, default all False) and ``entries`` (sample ID to :func:`entry`).
-        Every alt must already be in min-rep form against the ref.
+        Alleles are used as given, not min-repped, so a site can carry padded
+        alleles (as :data:`tests.test_genotypes.MIN_REP_SITES` does).
     :param samples: Sample ID to ``{"sex_karyotype": ..., "fixed_homalt_model":
         ...}``.
     :return: Namespace with ``vds`` (only ``variant_data`` is set), ``release_ht``,

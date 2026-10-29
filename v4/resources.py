@@ -11,8 +11,9 @@ MNV_ENTRIES_TO_KEEP = ["GT", "PGT", "PID", "GQ", "DP", "AD"]
 """Entry fields needed for MNV discovery (global names, post-split).
 
 GQ/DP/AD are used for the hom-alt depletion hotfix (allele balance) and adj
-genotype-quality filtering. The L-prefix loop in :func:`discover_mnv` maps
-GT->LGT, AD->LAD, PGT->LPGT and leaves GQ/DP/PID unchanged.
+genotype-quality filtering. The L-prefix loop in
+:func:`v4.discover_mnv.prepare_genotypes` maps GT->LGT, AD->LAD, PGT->LPGT and
+leaves GQ/DP/PID unchanged.
 """
 
 UKB_VDS = VariantDatasetResource("gs://gnomad/v4.0/raw/exomes/gnomad_v4.0.ukb.vds")
