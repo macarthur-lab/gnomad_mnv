@@ -7,6 +7,7 @@ skipped when the ``CI`` environment variable is set. Run only the fast tests wit
 """
 
 import os
+from typing import Iterator
 
 import hail as hl
 import pytest
@@ -54,7 +55,7 @@ def pytest_collection_modifyitems(
 
 
 @pytest.fixture(scope="session")
-def hail_session(tmp_path_factory: pytest.TempPathFactory) -> None:
+def hail_session(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
     """
     Start one local Hail session for the whole test run.
 

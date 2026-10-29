@@ -72,8 +72,8 @@ source paper; override per run with ``--max-distance``.
 HOM_ALT_FIX_AF_CUTOFF = 0.01
 """AF above which a high-AB het-ref call is reclassified to hom-alt.
 
-Part of the GATK hom-alt depletion hotfix (see :func:`discover_mnv`); mirrors the
-gnomAD default (``gnomad_qc.v3.utils.hom_alt_depletion_fix``).
+Part of the GATK hom-alt depletion hotfix (see :func:`prepare_genotypes`); mirrors
+the gnomAD default (``gnomad_qc.v3.utils.hom_alt_depletion_fix``).
 """
 
 HOM_ALT_FIX_AB_CUTOFF = 0.9
