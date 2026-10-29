@@ -189,6 +189,8 @@ After `hl.experimental.sparse_split_multi()`:
 | `v4/__init__.py` | Package init |
 | `v4/resources.py` | Resource paths, `get_gnomad_v4_vds()`, TableResource definitions |
 | `v4/discover_mnv.py` | MNV discovery (scan-based) and annotation |
+| `v4/create_test_data.py` | Builds the small test VDS and input slices used by the tests |
+| `tests/` | pytest suite; `gcs`-marked tests read the test data from GCS |
 
 ### Pipeline Steps, Algorithm, Output Schema
 

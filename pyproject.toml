@@ -4,6 +4,12 @@ preview = true
 [tool.isort]
 profile = "black"
 known_third_party = "gnomad"
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+markers = [
+    "gcs: reads the MNV test data from GCS; skipped in CI",
+]
 [tool.autopep8]
 # Use same max line length as the default in Black - 88
 max_line_length = 88
