@@ -16,7 +16,9 @@ v4/
 ├── __init__.py          # Package init
 ├── resources.py         # Data loading, GCS output paths, TableResource definitions
 ├── discover_mnv.py      # MNV discovery (scan-based) and frequency/VEP annotation
+├── create_test_data.py  # Builds the small test dataset used by tests/ (see §8)
 └── KNOWN_ISSUES.md      # Documented edge cases and shelved optimizations
+tests/                   # pytest suite (see §8)
 ```
 
 ### Dependencies
@@ -111,7 +113,9 @@ for `sparse_split_multi`.
    (`public_release("exomes").freq[0].AF` > 0.01, joined per-alt) to hom-alt, skipping
    het_non_ref and `fixed_homalt_model` samples; (c) `adjusted_sex_ploidy_expr` (no-op on
    autosomes); (d) `adj = get_adj_expr(LGT, GQ, DP, LAD)`. Sex karyotype and the hom-alt
-   model flag come from `meta()`.
+   model flag come from the sample metadata Table (`meta()`), which `main` reads and
+   passes in, as it does the info Table. Steps 2–5 are `prepare_genotypes`, so tests can
+   check the adjusted genotypes on their own.
 6. **Localize + build `_alts`**: `mt._localize_entries()` — convert to Table (required to
    avoid Hail's `KeyError: 'agg_capability'` IR bug with entry-level scans). No
    `unfilter_entries`/densify (see below). Each non-ref entry gets `_alts`: one record per
@@ -173,7 +177,8 @@ off the autosomes — the source paper used autosomes.
 | `_scan_for_candidates(ht, max_distance)` | Pipeline step | `hl.scan.fold` sliding window; narrows to candidate carriers and checkpoints |
 | `_classify_mnv_pairs(ht)` | Pipeline step | Explode carriers + classify alt pairs |
 | `_aggregate_mnv_pairs(ht)` | Pipeline step | group_by + aggregate counts |
-| `discover_mnv(vds, ...)` | Top-level | Orchestrates scan → classify → aggregate |
+| `prepare_genotypes(vds, release_ht, info_ht, meta_ht)` | Top-level | Site filters + genotype adjustments (steps 2–5) |
+| `discover_mnv(vds, release_ht, info_ht, meta_ht, ...)` | Top-level | Orchestrates `prepare_genotypes` → scan → classify → aggregate |
 
 ---
 
@@ -304,7 +309,45 @@ is also a Call type. Use `.phased`, `[0]`, `[1]` — not string methods.
 
 ---
 
-## 8. Test Results (PCSK9 region)
+## 8. Tests
+
+### Local test suite
+
+`pytest` (from the repo root, with `gnomad_qc` importable and a JDK for local Hail)
+runs two kinds of test:
+
+- `tests/test_genotypes.py` — hand-built inputs for each genotype edge case
+  (hotfix, `1/2`, alt-first phased hets, AS_lowqual, sex ploidy, PAR/non-PAR, chrY)
+  and for pair classification (cis, trans, unphased, hom-hom, het-hom, the 10 bp
+  limit). No GCS access needed.
+- `tests/test_test_data.py` (marker `gcs`) — runs the pipeline on the small test
+  dataset and checks that:
+  - every release SNV is counted, and any extra alt sits at an AS_lowqual site;
+  - each SNV alt's adj AC, hom count and XY AC equal the v4.1.1 release's, and its raw
+    AC and hom count do too (an `xfail` until gnomad_production#2300, because the raw
+    counts are where the hotfix order shows);
+  - pairs are within 10 bp, every pair class is present, and pair counts fit the alt
+    counts;
+  - the pairs match `tests/data/expected_mnv_pairs.tsv` (rewrite with
+    `--update-expected`).
+
+  These take about 3 minutes locally and need an 8 GB Spark driver heap (set
+  `MNV_TEST_DRIVER_MEMORY` to change it).
+
+Tests marked `gcs` are skipped when `CI` is set; `pytest -m "not gcs"` runs only the
+fast ones. Tests marked `xfail(strict=True)` describe the v4.1-matching behaviour
+decided in gnomad_production#2300 and start failing once it is implemented, so the
+marker gets removed.
+
+The test dataset is a release-only VDS cut down to `TEST_DATA_WINDOWS` (one partition,
+reference blocks split at the window edges), plus slices of the release, info, VEP and
+metadata Tables, under `gs://gnomad/v4.1/mnv/exomes/test_data/`. It is built by
+`v4/create_test_data.py`: `--compute-site-features` scores every site in the test genes
+for each test case, the windows are picked from those scores, `--build-vds` writes the
+VDS (checkpointed at its own partitioning, then coalesced to one partition), and
+`--build-tables` writes the Table slices.
+
+### PCSK9 region (historical)
 
 > **Historical — pre-dates the current algorithm.** These counts were measured before
 > the hom-alt depletion hotfix, `adj` annotation, sex-ploidy adjustment, min-rep-keyed

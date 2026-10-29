@@ -30,6 +30,13 @@ multiallelic sites and counting SNP alts whose locus shifts: 0 of 37,201 (PCNT) 
 multiallelic site with an indel that anchors the site's ref start to the *left* of the
 SNP — which none of these sites are.
 
+**It can't happen in v4 exomes.** A scan of every site in the unsplit v4 exomes info
+Table (dataproc job `09c05502f81848959457606508d14f27`, 2026-10-28) found **no** SNV alt
+whose min-repped locus differs from its site locus: a SNP after the first base of a
+deletion is written as its own site (with a `*` allele), not padded into the deletion's
+site. Genomes have not been checked. `tests/test_genotypes.py` covers both defects on
+hand-built data (the missed pair is an `xfail`).
+
 ### Background: two coordinate systems
 
 - **Scan** (`_scan_for_candidates`): walks the localized table one **site** row at a

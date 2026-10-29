@@ -482,19 +482,10 @@ def _per_alt_af(mt: hl.MatrixTable, release_ht: hl.Table) -> hl.Table:
     )
 
 
-def _drop_all_lowqual_sites(
-    mt: hl.MatrixTable,
-    filter_intervals: Optional[List[hl.expr.IntervalExpression]] = None,
-) -> hl.MatrixTable:
+def _drop_all_lowqual_sites(mt: hl.MatrixTable, info_ht: hl.Table) -> hl.MatrixTable:
     """
     Drop sites where every alt is AS_lowqual — release-excluded, can't be a
     real MNV, and dropping them shrinks the table fed to the scan.
-
-    The unsplit info Table (``AS_lowqual`` is ``array<bool>`` over alts) is re-read
-    with the variant_data's partition intervals so the join needs no shuffle. For
-    a gene-interval run it is instead filtered to ``filter_intervals``: the
-    partition intervals are contiguous, so one spanning the gap between two genes
-    would read every info row in between (most of the exome for 5 genes).
 
     .. note::
 
@@ -506,18 +497,10 @@ def _drop_all_lowqual_sites(
         responsible for dropping them if needed.
 
     :param mt: MatrixTable of variant data keyed by ``(locus, alleles)``.
-    :param filter_intervals: Locus intervals a gene-interval run was scoped to.
-        If None, the info Table is read with ``mt``'s partition intervals. Default
-        is None.
+    :param info_ht: Unsplit info Table keyed by ``(locus, alleles)``, with
+        ``AS_lowqual`` as ``array<bool>`` over alts.
     :return: ``mt`` with all-AS_lowqual sites removed.
     """
-    if filter_intervals is None:
-        intervals = mt._calculate_new_partitions(mt.n_partitions())
-        info_ht = hl.read_table(get_info(split=False).path, _intervals=intervals)
-    else:
-        info_ht = hl.filter_intervals(
-            hl.read_table(get_info(split=False).path), filter_intervals
-        )
     info_ht = info_ht.select(_all_lowqual=hl.all(info_ht.AS_lowqual))
     mt = mt.annotate_rows(
         _all_lowqual=hl.coalesce(info_ht[mt.row_key]._all_lowqual, False)
@@ -530,50 +513,34 @@ def _drop_all_lowqual_sites(
 # ---------------------------------------------------------------------------
 
 
-def discover_mnv(
+def prepare_genotypes(
     vds: hl.vds.VariantDataset,
     release_ht: hl.Table,
-    max_distance: int = MAX_MNV_DISTANCE,
+    info_ht: hl.Table,
+    meta_ht: hl.Table,
     entries_to_keep: List[str] = MNV_ENTRIES_TO_KEEP,
-    classify_n_partitions: Optional[int] = None,
-    filter_intervals: Optional[List[hl.expr.IntervalExpression]] = None,
-) -> hl.Table:
+) -> hl.MatrixTable:
     """
-    Run single-pass MNV discovery on an unsplit VDS.
+    Filter the variant data to MNV-capable sites and adjust its genotypes.
 
-    Stays in local allele space (LGT/LPGT/LA/PID). Pipeline: drop all-lowqual
-    sites → adjust genotypes (het_non_ref flag → hom-alt hotfix → sex ploidy →
-    adj, gnomAD QC's order) → localize → build ``_alts`` →
-    :func:`_scan_for_candidates` → :func:`_classify_mnv_pairs` →
-    :func:`_aggregate_mnv_pairs`.
-
-    .. note::
-
-        Scans a localized Table via ``hl.scan.array_agg``/``fold``, not an MT
-        entry scan — the latter hits ``KeyError: 'agg_capability'`` in Hail's
-        ``CSEAnalysisPass``. Sex-ploidy adjustment is applied
-        (``adjusted_sex_ploidy_expr``) and the code is ploidy-safe, so
-        ``--chr X``/``Y`` runs execute, but their output is incomplete for XY
-        samples: non-PAR XY het calls are dropped before the scan, leaving only
-        hom-hom pairs. See DOCUMENTATION.md §3 ("Sex chromosomes") for the
-        measured rates and validation scope, and KNOWN_ISSUES.md #2 for the
-        PAR-boundary case.
+    Drops all-lowqual sites and sites with no SNV alt, keeps the entry fields
+    discovery needs, then adjusts genotypes in gnomAD QC's order: het_non_ref
+    flag → hom-alt hotfix → sex ploidy → adj. These are the genotypes the scan
+    pairs up, so the per-variant counts they imply should match the release.
 
     :param vds: Unsplit gnomAD v4 VariantDataset.
     :param release_ht: Release sites Table supplying the per-alt AF the hom-alt
         depletion hotfix compares against.
-    :param max_distance: Max bp between the two SNVs. Default 2 (codon frame).
+    :param info_ht: Unsplit info Table with ``AS_lowqual`` (see
+        :func:`_drop_all_lowqual_sites`).
+    :param meta_ht: Sample metadata Table supplying
+        ``sex_imputation.sex_karyotype`` and ``project_meta.fixed_homalt_model``.
     :param entries_to_keep: Entry fields to keep (global/post-split names).
-    :param classify_n_partitions: If set, repartition before classification.
-        Only pass at gene-interval scale (``--intervals`` or ``--test-genes``);
-        see the CLI help for why.
-    :param filter_intervals: Locus intervals a gene-interval run was scoped to,
-        so the info Table join stays within them (see :func:`_drop_all_lowqual_sites`).
-        Default is None.
-    :return: Hail Table of MNV pairs with per-pair counts.
+    :return: Variant data MatrixTable with adjusted ``LGT`` and an ``adj`` entry
+        field.
     """
     mt = vds.variant_data
-    mt = _drop_all_lowqual_sites(mt, filter_intervals)
+    mt = _drop_all_lowqual_sites(mt, info_ht)
     mt = mt.filter_rows(hl.any(lambda a: hl.is_snp(mt.alleles[0], a), mt.alleles[1:]))
 
     # entries_to_keep uses global names; L-prefix the ones the split remaps.
@@ -591,7 +558,6 @@ def discover_mnv(
         hl.utils.new_temp_file("mnv_alt_af", "ht")
     )
     mt = mt.select_rows(_alt_af=af_ht[mt.locus, mt.alleles]._alt_af)
-    meta_ht = meta().ht()
     mt = mt.select_cols(
         sex_karyotype=meta_ht[mt.s].sex_imputation.sex_karyotype,
         fixed_homalt_model=meta_ht[mt.s].project_meta.fixed_homalt_model,
@@ -620,7 +586,53 @@ def discover_mnv(
     mt = mt.annotate_entries(
         LGT=adjusted_sex_ploidy_expr(mt.locus, mt.LGT, mt.sex_karyotype)
     )
-    mt = mt.annotate_entries(adj=get_adj_expr(mt.LGT, mt.GQ, mt.DP, mt.LAD))
+    return mt.annotate_entries(adj=get_adj_expr(mt.LGT, mt.GQ, mt.DP, mt.LAD))
+
+
+def discover_mnv(
+    vds: hl.vds.VariantDataset,
+    release_ht: hl.Table,
+    info_ht: hl.Table,
+    meta_ht: hl.Table,
+    max_distance: int = MAX_MNV_DISTANCE,
+    entries_to_keep: List[str] = MNV_ENTRIES_TO_KEEP,
+    classify_n_partitions: Optional[int] = None,
+) -> hl.Table:
+    """
+    Run single-pass MNV discovery on an unsplit VDS.
+
+    Stays in local allele space (LGT/LPGT/LA/PID). Pipeline:
+    :func:`prepare_genotypes` (drop all-lowqual sites, adjust genotypes) →
+    localize → build ``_alts`` → :func:`_scan_for_candidates` →
+    :func:`_classify_mnv_pairs` → :func:`_aggregate_mnv_pairs`.
+
+    .. note::
+
+        Scans a localized Table via ``hl.scan.array_agg``/``fold``, not an MT
+        entry scan — the latter hits ``KeyError: 'agg_capability'`` in Hail's
+        ``CSEAnalysisPass``. Sex-ploidy adjustment is applied
+        (``adjusted_sex_ploidy_expr``) and the code is ploidy-safe, so
+        ``--chr X``/``Y`` runs execute, but their output is incomplete for XY
+        samples: non-PAR XY het calls are dropped before the scan, leaving only
+        hom-hom pairs. See DOCUMENTATION.md §3 ("Sex chromosomes") for the
+        measured rates and validation scope, and KNOWN_ISSUES.md #2 for the
+        PAR-boundary case.
+
+    :param vds: Unsplit gnomAD v4 VariantDataset.
+    :param release_ht: Release sites Table supplying the per-alt AF the hom-alt
+        depletion hotfix compares against.
+    :param info_ht: Unsplit info Table with ``AS_lowqual`` (see
+        :func:`_drop_all_lowqual_sites`).
+    :param meta_ht: Sample metadata Table supplying sex karyotype and the
+        ``fixed_homalt_model`` flag (see :func:`prepare_genotypes`).
+    :param max_distance: Max bp between the two SNVs. Default 2 (codon frame).
+    :param entries_to_keep: Entry fields to keep (global/post-split names).
+    :param classify_n_partitions: If set, repartition before classification.
+        Only pass at gene-interval scale (``--intervals`` or ``--test-genes``);
+        see the CLI help for why.
+    :return: Hail Table of MNV pairs with per-pair counts.
+    """
+    mt = prepare_genotypes(vds, release_ht, info_ht, meta_ht, entries_to_keep)
 
     # No densify: the scan treats a missing entry like 0/0 (both "not non-ref"),
     # so hom-ref entries stay sparse instead of materializing a 0/0 per sample
@@ -776,15 +788,30 @@ def main(args: argparse.Namespace) -> None:
             release_only=args.release_only,
         )
 
+        # The unsplit info Table is read with the variant data's partition
+        # intervals so the join needs no shuffle. A gene-interval run filters it
+        # to the genes instead: the partition intervals are contiguous, so one
+        # spanning the gap between two genes would read every info row in between.
+        if gene_intervals is None:
+            info_ht = hl.read_table(
+                get_info(split=False).path,
+                _intervals=vds.variant_data._calculate_new_partitions(
+                    vds.variant_data.n_partitions()
+                ),
+            )
+        else:
+            info_ht = hl.filter_intervals(get_info(split=False).ht(), gene_intervals)
+
         # classify_n_partitions is gene-interval-only (--intervals/--test-genes);
         # the CLI rejects it otherwise.
         mnv_ht = discover_mnv(
             vds,
             release_ht,
+            info_ht,
+            meta().ht(),
             max_distance=args.max_distance,
             entries_to_keep=MNV_ENTRIES_TO_KEEP,
             classify_n_partitions=args.classify_n_partitions,
-            filter_intervals=gene_intervals,
         )
 
         discovery_resource = get_discovered_mnvs(

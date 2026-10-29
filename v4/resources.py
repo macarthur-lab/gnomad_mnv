@@ -236,6 +236,63 @@ def get_annotated_mnvs(
     )
 
 
+TEST_DATA_WINDOWS = {
+    # Autosomal cases, all at clean SNV sites: pairs 1, 2, 3-10 and 11 bp apart;
+    # phased het pairs; a 1/2 carrier in a pair; an alt-first phased het whose adj
+    # flips under the v4.1 reading; hotfix calls that pass and fail adj; an
+    # all-AS_lowqual site and a mixed one.
+    "AHNAK2": ("chr14", 104943599, 104943748),
+    # PAR1: pairs and XY hets that stay diploid.
+    "SHOX": ("chrX", 651588, 651737),
+    # Non-PAR X, ~680 bp past the PAR1 end: XY hets set missing, and XY high-AB
+    # hets at a common site, where the hotfix order matters.
+    "XG": ("chrX", 2782159, 2782308),
+    # Non-PAR Y: haploid XY calls and XX calls that are dropped.
+    "DDX3Y": ("chrY", 12913124, 12913273),
+}
+"""Short GRCh38 ``(contig, start, end)`` windows the test VDS is cut down to.
+
+Picked from per-site scores over the test genes (see ``v4/create_test_data.py``)
+so that together they cover every case the test suite checks.
+"""
+
+TEST_DATA_TABLES = ["release", "info", "vep", "meta"]
+"""Input Tables sliced to the test windows and saved next to the test VDS."""
+
+
+def get_test_data(
+    data: str = "vds",
+    version: str = CURRENT_VERSION,
+    data_type: str = "exomes",
+) -> Union[TableResource, VariantDatasetResource]:
+    """Get a resource from the small MNV test dataset.
+
+    The test dataset is a release-only VDS cut down to a few short windows, plus
+    slices of the Tables the pipeline reads, so the local test suite never touches
+    the full-size inputs. It is written by ``v4/create_test_data.py --build-vds
+    --build-tables`` to a ``test_data/`` folder under the production path, which is
+    not cleaned up.
+
+    :param data: ``"vds"`` for the test VDS, or one of :data:`TEST_DATA_TABLES`.
+        Default is ``"vds"``.
+    :param version: gnomAD version string. Default is :data:`CURRENT_VERSION`.
+    :param data_type: Data type, either ``"exomes"`` or ``"genomes"``. Default is
+        ``"exomes"``.
+    :return: VariantDatasetResource for ``"vds"``, else a TableResource.
+    """
+    path = (
+        f"{_mnv_root_path(version, data_type=data_type)}/test_data"
+        f"/gnomad.{data_type}.v{version}.mnv_test"
+    )
+    if data == "vds":
+        return VariantDatasetResource(f"{path}.vds")
+    if data not in TEST_DATA_TABLES:
+        raise ValueError(
+            f"Unknown test data {data!r}; expected 'vds' or one of {TEST_DATA_TABLES}."
+        )
+    return TableResource(f"{path}.{data}.ht")
+
+
 def get_gnomad_v4_vds(
     filter_intervals: Optional[List[Union[str, hl.tinterval]]] = None,
     high_quality_only: bool = False,
