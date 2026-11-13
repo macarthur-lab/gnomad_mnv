@@ -718,14 +718,14 @@ def main(args: argparse.Namespace) -> None:
         chrom = _normalize_chrom(args.chr)
         intervals = [chrom]
     elif args.test_genes is not None:
-        parsed = get_test_gene_intervals(args.test_genes)
+        parsed = get_test_gene_intervals(args.test_genes, args.max_distance)
         gene_names = [name for name, _ in parsed]
         intervals = [interval for _, interval in parsed]
     elif args.intervals is not None:
         parsed = (
             _parse_intervals(args.intervals)
             if args.intervals
-            else get_test_gene_intervals("default")
+            else get_test_gene_intervals("default", args.max_distance)
         )
         gene_names = [name for name, _ in parsed]
         intervals = [interval for _, interval in parsed]
@@ -892,8 +892,8 @@ if __name__ == "__main__":
         help=(
             "Free-form suffix appended last to the discovery/annotated output"
             " filenames (e.g. your username), so a run doesn't overwrite anyone"
-            " else's output. E.g. '--output-suffix mwilson' writes"
-            " '...mnv_discovery.mwilson.ht'."
+            " else's output, or to keep runs with different settings apart. E.g."
+            " '--output-suffix mwilson' writes '...mnv_discovery.mwilson.ht'."
         ),
         type=str,
         default=None,
@@ -979,7 +979,10 @@ if __name__ == "__main__":
         "--max-distance",
         help=(
             "Maximum distance in bp between two SNVs to consider as an MNV."
-            f" Default is {MAX_MNV_DISTANCE}."
+            f" Default is {MAX_MNV_DISTANCE}. Test gene intervals (--test-genes, or"
+            " --intervals with no values) are padded by this much when it exceeds"
+            " their usual 100 bp, so pass the same value to a separate --annotate"
+            " run."
         ),
         type=int,
         default=MAX_MNV_DISTANCE,

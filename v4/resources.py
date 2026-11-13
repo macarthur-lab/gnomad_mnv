@@ -67,27 +67,33 @@ default run is quick. It's also what ``--intervals`` uses when given no values.
 """
 
 TEST_GENE_PADDING = 100
-"""bp added to each side of a test gene's span when building its interval.
+"""Minimum bp added to each side of a test gene's span when building its interval.
 
-Wider than the largest pair distance, so pairs at a gene's edges aren't cut off,
-but close enough to the gene that the region still matches the variant
-co-occurrence test intervals.
+Wider than any pair distance we expect to run, so pairs at a gene's edges aren't cut
+off, but close enough to the gene that the region still matches the variant
+co-occurrence test intervals. :func:`get_test_gene_intervals` pads by the run's
+``max_distance`` instead when that is larger.
 """
 
 
 def get_test_gene_intervals(
-    gene_set: str, padding: int = TEST_GENE_PADDING
+    gene_set: str, max_distance: int = 0
 ) -> List[Tuple[str, str]]:
     """
     Get the padded (gene_name, interval) pairs for a named test gene set.
 
+    Each gene span is padded by :data:`TEST_GENE_PADDING`, or by ``max_distance``
+    if that is larger, so a pair with one SNV in the gene and the other just outside
+    it still falls inside the interval.
+
     :param gene_set: Key of :data:`TEST_GENE_SETS`: ``"default"``,
         ``"autosomes"``, ``"sex_chr"`` or ``"all"``.
-    :param padding: bp added to each side of every gene span. Default is
-        :data:`TEST_GENE_PADDING`.
+    :param max_distance: Maximum pair distance of the run. Default is 0, which pads
+        by :data:`TEST_GENE_PADDING`.
     :return: List of (gene_name, interval) tuples, e.g.
         ``("SGCA", "chr17:50164114-50176028")``.
     """
+    padding = max(TEST_GENE_PADDING, max_distance)
     return [
         (name, f"{contig}:{max(start - padding, 1)}-{end + padding}")
         for name, (contig, start, end) in TEST_GENE_SETS[gene_set].items()

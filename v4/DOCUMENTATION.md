@@ -60,6 +60,13 @@ hailctl dataproc submit <CLUSTER> v4/discover_mnv.py \
   --pyfiles /tmp/pyfiles.zip \
   -- --discover --annotate --test-genes all --overwrite
 
+# Test gene runs with different settings write to the same test_genes/ paths, so
+# give each variant its own --output-suffix.
+hailctl dataproc submit <CLUSTER> v4/discover_mnv.py \
+  --pyfiles /tmp/pyfiles.zip \
+  -- --discover --annotate --test-genes all --release-only --max-distance 10 \
+  --output-suffix release_only.d10 --overwrite
+
 # Full-cohort, genome-wide run (no interval flags). Note that --test alone does
 # NOT subset intervals; it only redirects output to the test bucket.
 hailctl dataproc submit <CLUSTER> v4/discover_mnv.py \
@@ -74,14 +81,14 @@ CLI arguments:
 | `--discover` | Run MNV discovery |
 | `--annotate` | Run frequency + VEP annotation |
 | `--test` | Write output to the test bucket instead of production. **Does not subset intervals** — on its own this is a full-cohort, genome-wide run |
-| `--intervals GENE=INTERVAL ...` | Subset discovery to one or more gene intervals. Implies `--test`. With no values, uses the `default` test gene set: `SGCA=chr17:50164114-50176028` (padded by 100 bp). Mutually exclusive with `--chr` and `--test-genes` |
-| `--test-genes {default,autosomes,sex_chr,all}` | Subset discovery to a named test gene set, each gene padded by 100 bp: `default` (SGCA, the smallest autosomal test gene), `autosomes` (AHNAK2, ANO5, CAPN3, DYSF, SGCA, the variant co-occurrence test genes), `sex_chr` (SHOX in PAR1, XG across the PAR1 boundary, EMD on non-PAR X, DDX3Y on Y), or `all`. `default` writes to the test bucket like `--intervals`; the larger sets write to a `test_genes/` folder under the production path, unless `--test` is given. Mutually exclusive with `--chr` and `--intervals` |
+| `--intervals GENE=INTERVAL ...` | Subset discovery to one or more gene intervals. Implies `--test`. With no values, uses the `default` test gene set: `SGCA=chr17:50164114-50176028` (padded by 100 bp, or by `--max-distance` if larger). Mutually exclusive with `--chr` and `--test-genes` |
+| `--test-genes {default,autosomes,sex_chr,all}` | Subset discovery to a named test gene set, each gene padded by 100 bp (or by `--max-distance` if larger): `default` (SGCA, the smallest autosomal test gene), `autosomes` (AHNAK2, ANO5, CAPN3, DYSF, SGCA, the variant co-occurrence test genes), `sex_chr` (SHOX in PAR1, XG across the PAR1 boundary, EMD on non-PAR X, DDX3Y on Y), or `all`. `default` writes to the test bucket like `--intervals`; the larger sets write to a `test_genes/` folder under the production path, unless `--test` is given. Mutually exclusive with `--chr` and `--intervals` |
 | `--chr N` | Run on a single whole chromosome (e.g. `--chr 21`, `--chr X`); writes to the production bucket. Mutually exclusive with `--intervals` and `--test-genes` |
 | `--ukb-only` | Use the UKB-only VDS subset; adds `.ukb_only` to the output path |
-| `--output-suffix S` | Free-form suffix appended last to the output path, so runs don't overwrite each other |
+| `--output-suffix S` | Free-form suffix appended last to the output path, so runs don't overwrite each other. Use it to keep test gene runs with different settings (e.g. `--release-only`, `--max-distance`) apart in `test_genes/` |
 | `--classify-n-partitions N` | Repartition before classification. Requires `--intervals` or `--test-genes` (rejected otherwise) |
 | `--overwrite` | Overwrite existing output files |
-| `--max-distance N` | Max bp distance between SNVs (default: 2) |
+| `--max-distance N` | Max bp distance between SNVs (default: 2). Also pads test gene intervals when larger than 100 bp; pass the same value to a separate `--annotate` run |
 | `--high-quality-only` | Filter to high-quality samples only |
 | `--release-only` | Filter to release samples only |
 
@@ -238,7 +245,8 @@ set).
   `autosomes` (AHNAK2, ANO5, CAPN3, DYSF, SGCA), `sex_chr` (SHOX, XG, EMD, DDX3Y) and
   `all`. Built from `AUTOSOME_TEST_GENES` and `SEX_CHR_TEST_GENES`, which hold GRCh38
   `(contig, start, end)` gene spans.
-- `TEST_GENE_PADDING = 100` — bp added to each side of a test gene's span.
+- `TEST_GENE_PADDING = 100` — minimum bp added to each side of a test gene's span
+  (the run's `max_distance` is used instead when larger).
 
 ### Functions
 
@@ -248,7 +256,7 @@ set).
 | `get_annotated_mnvs(test=False)` | `TableResource` | Annotated output path |
 | `get_gnomad_v4_vds(...)` | `VariantDataset` | Loads unsplit VDS via `gnomad_qc` |
 | `get_gnomad_v4_ukb_vds(...)` | `VariantDataset` | Loads the UKB-only VDS subset (`--ukb-only`) |
-| `get_test_gene_intervals(gene_set, padding=TEST_GENE_PADDING)` | `List[Tuple[str, str]]` | Padded `(gene_name, interval)` pairs for a test gene set (`--test-genes`, and `--intervals` with no values) |
+| `get_test_gene_intervals(gene_set, max_distance=0)` | `List[Tuple[str, str]]` | Padded `(gene_name, interval)` pairs for a test gene set (`--test-genes`, and `--intervals` with no values) |
 | `UKB_VDS` | `VariantDatasetResource` | Path to the pre-built UKB-only VDS subset |
 
 ### Output paths
