@@ -1,5 +1,9 @@
 # Known issues — v4 MNV discovery
 
+The single-gene figures below are for PCNT, which is what a bare `--intervals` ran
+before the `default` test gene set (SGCA) replaced it. To reproduce them now, pass the
+interval explicitly: `--intervals PCNT=chr21:46324141-46445769`.
+
 ## 1. min-rep locus shift vs. site-locus scan window
 
 **Status:** known, un-fixed by design (a post-write guard *warns* but does not correct
